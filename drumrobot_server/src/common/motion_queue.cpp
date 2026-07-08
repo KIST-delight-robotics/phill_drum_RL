@@ -23,6 +23,13 @@ std::optional<MotionPrimitive> MotionQueue::try_pop() {
     return motion;
 }
 
+// 맨 앞 원소를 꺼내지 않고 복사만 해서 반환 (소비 경로는 try_pop 하나로 유지)
+std::optional<MotionPrimitive> MotionQueue::try_peek() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) return std::nullopt;
+    return queue_.front();
+}
+
 void MotionQueue::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::queue<MotionPrimitive> empty;

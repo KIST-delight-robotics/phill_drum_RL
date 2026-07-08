@@ -28,24 +28,37 @@ def send(s, packet):
     s.sendall((packet + "\n").encode())
 
 def get_status(s):
-    """GET_STATUS 전송 후 (state, [angle_deg,...], speed) 반환. 실패 시 (None, [], None).
+    """GET_STATUS 전송 후 (state, [angle_deg,...], speed, pause) 반환. 실패 시 (None, [], None, None).
 
-    서버 응답 형식: STATUS|<state>|<q0>|...|<q12>|<play_speed_scale>
-    마지막 필드가 속도 배율이다. (구버전 서버는 속도 필드가 없을 수 있어
-    필드 수로 판별한다.)
+    서버 응답 형식: STATUS|<state>|<q0>|...|<q12>|<speed>|<pause_valid>|<pause_id>|<pause_bar>
+    pause는 재개 지점이 있으면 {"id": 곡id, "bar": 마디} 없으면 None.
+    (구버전 서버는 speed까지만 보낼 수 있어 필드 수로 판별한다.)
     """
     send(s, "GET_STATUS")
     data = s.recv(4096).decode().strip()
     parts = data.split("|")
     if not parts or parts[0] != "STATUS":
         print(f"  예기치 않은 응답: {data}")
-        return None, [], None
+        return None, [], None, None
     state = parts[1] if len(parts) > 1 else "UNKNOWN"
 
     fields = parts[2:]
     speed = None
-    # 관절각 + 속도 1개가 모두 있으면 마지막을 속도로 분리
-    if len(fields) == len(JOINTS) + 1:
+    pause = None
+    if len(fields) == len(JOINTS) + 4:
+        # 신형: 관절각 + speed + pause_valid + pause_id + pause_bar
+        if fields[-3] == "1":
+            try:
+                pause = {"id": fields[-2], "bar": int(fields[-1])}
+            except ValueError:
+                pause = None
+        try:
+            speed = float(fields[-4])
+        except ValueError:
+            speed = None
+        fields = fields[:-4]
+    elif len(fields) == len(JOINTS) + 1:
+        # 구형: 관절각 + speed
         try:
             speed = float(fields[-1])
         except ValueError:
@@ -58,12 +71,14 @@ def get_status(s):
             angles.append(float(a))
         except ValueError:
             angles.append(None)
-    return state, angles, speed
+    return state, angles, speed, pause
 
-def print_status(state, angles, speed=None):
+def print_status(state, angles, speed=None, pause=None):
     print(f"  로봇 상태: {state}")
     if speed is not None:
         print(f"  연주 속도 배율: {speed:.2f}x")
+    if pause is not None:
+        print(f"  재개 지점: 곡 {pause['id']}, 마디 {pause['bar']} (RESUME 가능)")
     print("  현재 목표 관절각 (deg):")
     for i, (name, _, _) in enumerate(JOINTS):
         cur = angles[i] if i < len(angles) and angles[i] is not None else None
@@ -82,7 +97,7 @@ def print_pending(pending):
 def test_mode(s):
     """관절 번호를 하나씩 입력받아 목표각을 누적하고, run 입력 시 MOVE로 일괄 전송."""
     # TODO: 팁 목표 위치를 받아 전송하기
-    state, angles, _ = get_status(s)
+    state, angles, _, _ = get_status(s)
     if state is None:
         return
     print("\n--- 테스트 모드 ---")
@@ -174,7 +189,7 @@ def play_ctrl_mode(s):
     제한한다. 명령 전송 후 GET_STATUS 로 서버가 적용한 실제 배율을 다시 읽어
     표시하므로, 범위 밖 요청이 제한돼도 화면에 정확히 반영된다.
     """
-    state, _, speed = get_status(s)
+    state, _, speed, _ = get_status(s)
     print("\n--- 연주 제어 모드 ---")
     print(f"  로봇 상태: {state}")
     if speed is not None:
@@ -186,13 +201,13 @@ def play_ctrl_mode(s):
     # 서버가 보고한 실제 배율을 기준으로 시작 (없으면 1.0 가정)
     cur_scale = speed if speed is not None else 1.0
 
-    print("\n  명령: stop=연주 중지 / f=빠르게(+0.1) / d=느리게(-0.1)")
-    print("        s=배율 직접 입력 / q=메뉴로 복귀")
+    print("\n  명령: pause=일시정지(재개 가능) / stop=연주 중지(재개 불가)")
+    print("        f=빠르게(+0.1) / d=느리게(-0.1) / s=배율 직접 입력 / q=메뉴로 복귀")
 
     def send_speed(target):
         """속도 요청 후 서버 실제값을 다시 읽어 표시."""
         send(s, f"PLAY_CTRL|speed|{target:.2f}")
-        st, _, sp = get_status(s)
+        st, _, sp, _ = get_status(s)
         if sp is not None:
             note = " (서버 제한 적용됨)" if abs(sp - target) > 1e-6 else ""
             print(f"  속도 배율: {sp:.2f}x{note}")
@@ -202,14 +217,19 @@ def play_ctrl_mode(s):
         return target
 
     while True:
-        cmd = input("연주 제어 (stop / f / d / s / q) > ").strip().lower()
+        cmd = input("연주 제어 (pause / stop / f / d / s / q) > ").strip().lower()
 
         if cmd in ("q", "quit"):
             return
 
+        if cmd == "pause":
+            send(s, "PAUSE")
+            print("  일시정지 요청을 보냈습니다. (메뉴의 재개 항목으로 이어서 연주)")
+            return   # 정지 후 곧 IDLE 로 돌아가므로 메뉴 복귀
+
         if cmd == "stop":
             send(s, "PLAY_CTRL|stop")
-            print("  연주 중지 요청을 보냈습니다.")
+            print("  연주 중지 요청을 보냈습니다. (재개 지점은 폐기됩니다)")
             return   # 중지 후 곧 IDLE 로 돌아가므로 메뉴 복귀
 
         if cmd in ("f", "d"):
@@ -261,7 +281,8 @@ def main():
             for k, (label, _) in MODES.items():
                 print(f"  {k}. {label}")
             print("  6. 테스트 모드 (관절각 직접 입력)")
-            print("  7. 연주 제어 (중지 / 속도, PLAYING 중)")
+            print("  7. 연주 제어 (일시정지 / 중지 / 속도, PLAYING 중)")
+            print("  8. 연주 재개 (일시정지한 곡을 멈춘 마디부터)")
             print("  q. 종료")
             choice = input("선택 > ").strip().lower()
 
@@ -273,6 +294,18 @@ def main():
                 continue
             if choice == "7":
                 play_ctrl_mode(s)
+                continue
+            if choice == "8":
+                # 저장된 재개 지점(PAUSE로 멈춘 기록)이 있을 때만 RESUME 전송
+                state, _, _, pause = get_status(s)
+                if pause is None:
+                    print("  저장된 재개 지점이 없습니다. (연주 중 PAUSE로 멈춘 경우에만 재개 가능)")
+                    continue
+                if state != "IDLE":
+                    print(f"  현재 상태({state})에서는 재개할 수 없습니다. IDLE에서 다시 시도하세요.")
+                    continue
+                send(s, "RESUME")
+                print(f"  재개 요청: 곡 {pause['id']}, 마디 {pause['bar']}부터 이어서 연주합니다.")
                 continue
             if choice in MODES:
                 send(s, MODES[choice][1]())   # 해당 OPCODE 생성 후 전송

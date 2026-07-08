@@ -250,7 +250,11 @@ OPCODE|arg1|arg2\n
 | `MOVE`      | `motor_name`, `angle_deg`, `[move_time=3.0]`   | 개별 관절 이동 | Idle |
 | `POSE`      | `pose_name`                                     | 사전 정의 포즈로 이동 (`home` / `ready` / `shutdown`) | Idle |
 | `HIT`       | `target`                                        | 단일 드럼 타격 | Idle |
-| `PLAY`      | `score_name`                                    | 악보 파일 연주 (`data/scores/<name>.txt`) | Idle |
+| `PLAY`      | `id`                                            | 악보 연주. `config/play_list.json`의 id로 악보/음원 선택 | Idle |
+| `PAUSE`     | 없음                                            | 연주 일시정지. **재개 지점(마디) 저장** 후 ready 복귀 → `RESUME` 가능 | Playing |
+| `RESUME`    | 없음                                            | 일시정지한 곡을 저장된 마디부터 재개 (음악 없이 무음 재개) | Idle |
+| `PLAY_CTRL` | `stop` 또는 `speed`, `scale`                    | 연주 제어. `stop`=완전 중지(재개 지점 폐기), `speed`=속도 배율(0.5~2.0) | Playing |
+| `GET_STATUS`| 없음                                            | 상태 조회. 응답: `STATUS\|<state>\|<q0..q12>\|<speed>\|<pause_valid>\|<pause_id>\|<pause_bar>` (`pause_valid=1`이면 RESUME 가능) | 모든 상태 |
 | `QUIT` / `Q`| 없음                                            | shutdown 포즈 이동 후 시스템 종료 | 모든 상태 |
 
 > `START` 와 `QUIT` 외의 명령은 `send_active`가 켜진 이후(=`START`로 첫 궤적이 적재된 이후)에만 처리됩니다.
@@ -276,7 +280,11 @@ MOVE|right_wrist|45|1.0     # right_wrist를 45도로 1.0초에 이동
 MOVE|waist|-30|2.0          # 허리를 -30도로 2초에 이동
 HIT|snare                   # 스네어 1회 타격
 HIT|closed hihat            # 클로즈드 하이햇 1회 타격 (타깃 문자열에 공백 포함)
-PLAY|BasicFillin_0          # data/scores/BasicFillin_0.txt 연주
+PLAY|BF                     # play_list.json의 BF(BasicFillin) 연주
+PAUSE                       # 연주 일시정지 (재개 지점 저장, PLAYING 중)
+RESUME                      # 멈춘 마디부터 이어서 연주 (IDLE 중)
+PLAY_CTRL|stop              # 연주 완전 중지 (재개 지점 폐기)
+PLAY_CTRL|speed|1.2         # 연주 속도 1.2배
 QUIT                        # shutdown 포즈 이동 후 종료
 ```
 
@@ -320,8 +328,8 @@ Standby ──START──▶ Init ── READY ──▶ Idle ──PLAY──�
 |---|---|---|
 | `Standby → Init`      | `START` 입력 (`handle_start`). home 자세로 이동시키고 토크 ON | `BehaviorPlanner` |
 | `Init → Idle`         | `READY` 입력 (`handle_ready`). 고정 키 제거 완료 후 동작 허용 | `BehaviorPlanner` |
-| `Idle → Playing`      | `PLAY` 입력 (`handle_play`) | `BehaviorPlanner` |
-| `Playing → Idle`      | 악보 소진 후 motion_queue가 비면 자동 복귀 (`schedule_idle_motion`) | `MotionPlanner` |
+| `Idle → Playing`      | `PLAY` 입력 (`handle_play`) 또는 `RESUME` 입력 (`handle_resume`) | `BehaviorPlanner` |
+| `Playing → Idle`      | 악보 소진 후 motion_queue가 비면 자동 복귀 (`schedule_idle_motion`). `PAUSE`/`PLAY_CTRL\|stop`도 잔여 모션 폐기 후 같은 경로로 복귀 | `MotionPlanner` |
 | `* → ShuttingDown`    | `QUIT` 입력 또는 `POSE shutdown` | `BehaviorPlanner` |
 
 > `START` / `QUIT` 외의 명령은 `send_active`가 켜진 이후(=`START`로 첫 궤적이 적재된 이후)에만 처리됩니다. 또한 동작 명령(`LOOK` / `GESTURE` / `MOVE` / `POSE` / `HIT` / `PLAY`)은 `Idle` 상태에서만 허용되며, 그 외 상태에서는 거부됩니다.

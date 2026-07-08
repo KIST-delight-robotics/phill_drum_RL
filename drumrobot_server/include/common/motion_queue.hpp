@@ -52,6 +52,7 @@ public:
     void push(const MotionPrimitive& motion);
     bool empty();
     std::optional<MotionPrimitive> try_pop();
+    std::optional<MotionPrimitive> try_peek();
     void clear();
 
 private:

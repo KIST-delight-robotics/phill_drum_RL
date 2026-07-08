@@ -30,7 +30,9 @@ enum class Opcode {
     // args 없음
     START,      // 시작
     READY,      // 상태 변경
-    GET_STATUS, // 로봇 상태 조회 (응답: STATUS|<state>) 
+    PAUSE,      // 연주 일시정지 (재개 지점 저장, PLAYING 전용)
+    RESUME,     // 저장된 지점부터 연주 재개 (IDLE 전용)
+    GET_STATUS, // 로봇 상태 조회 (응답: STATUS|<state>)
     QUIT,       // 종료
     UNKNOWN
 };

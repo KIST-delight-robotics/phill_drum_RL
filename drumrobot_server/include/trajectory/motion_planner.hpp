@@ -42,6 +42,7 @@ private:
     void plan_motions(const ParsedCommand& cmd);
     void schedule_idle_motion();
     void abort_play_motion();
+    void save_pause_point();
 
     bool motion_done = true;
 

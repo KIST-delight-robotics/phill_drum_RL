@@ -52,8 +52,9 @@ void TcpServer::run() {
                         [](unsigned char c){ return std::toupper(c); });
 
             // ===== 상태 조회: 큐에 넣지 않고 즉시 응답 =====
-            // 응답 형식: STATUS|<robot_state>|<q0_deg>|<q1_deg>|...  (단위: degree)
-            // q 값은 "마지막으로 명령된 목표 자세"이며 실측값이 아님.
+            // 응답 형식: STATUS|<robot_state>|<q0_deg>|...|<q12_deg>|<speed>|<pause_valid>|<pause_id>|<pause_bar>
+            // q 값은 "마지막으로 명령된 목표 자세"이며 실측값이 아님. (단위: degree)
+            // pause_valid=1 이면 PAUSE로 저장된 재개 지점이 있음 (RESUME 가능).
             if (upper == "GET_STATUS") {
                 std::ostringstream oss;
                 oss << "STATUS|" << state_to_string(ctx.robot_state.load());
@@ -65,6 +66,14 @@ void TcpServer::run() {
                     }
                 }
                 oss << "|" << ctx.play_speed_scale;
+                {
+                    std::lock_guard<std::mutex> lk(ctx.play_mutex);
+                    if (ctx.pause_point.valid) {
+                        oss << "|1|" << ctx.pause_point.play_id << "|" << ctx.pause_point.bar;
+                    } else {
+                        oss << "|0|-|0";
+                    }
+                }
                 oss << "\n";
                 std::string resp = oss.str();
                 send(client_fd, resp.c_str(), resp.size(), 0);

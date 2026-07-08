@@ -103,6 +103,11 @@ void MotionPlanner::schedule_idle_motion() {
         std::cerr << "[MotionPlanner] 연주를 마쳤습니다.\n";
         motion_done = true;
 
+        {
+            std::lock_guard<std::mutex> lock(ctx.play_mutex);
+            ctx.play_id.clear();    // 연주 끝 -> 현재 곡 없음 (pause_point는 유지)
+        }
+
         // 대기 동작
         ctx.robot_state = RobotState::IDLE;
         MotionPrimitive idle_motion;
@@ -113,12 +118,49 @@ void MotionPlanner::schedule_idle_motion() {
 }
 
 void MotionPlanner::abort_play_motion() {
+    if (ctx.pause_requested.load()) {
+        save_pause_point();   // PAUSE: 잔여 모션 폐기 전에 재개 지점 저장
+    } else {
+        // stop / 내부 에러: 재개 지점 폐기 (RESUME 거부)
+        std::lock_guard<std::mutex> lock(ctx.play_mutex);
+        ctx.pause_point.valid = false;
+    }
+    ctx.pause_requested = false;
+
     motion_queue.clear();     // 남은 PLAYING 전부 폐기
     MotionPrimitive end; end.type = MotionType::DRUM; end.flag = PlayFlag::END;
     motion_queue.push(end);   // END(ready 복귀)만 남김
 
     ctx.play_abort = false;
     std::cerr << "[MotionPlanner] 연주가 비정상 종료됩니다.\n";
+}
+
+// 중단 시점의 재개 지점 저장.
+// MotionQueue 맨 앞은 아직 궤적을 생성하지 않은 primitive이므로,
+// 그 안의 "다음에 칠 이벤트"의 마디 번호가 곧 재개 지점이다.
+// 반드시 motion_queue.clear() 전에 불러야 한다.
+void MotionPlanner::save_pause_point() {
+    std::optional<MotionPrimitive> front_motion = motion_queue.try_peek();
+
+    std::lock_guard<std::mutex> lock(ctx.play_mutex);
+    ctx.pause_point.valid = false;
+
+    if (!front_motion.has_value()) return;      // 큐가 비어 있음 (곡이 사실상 끝난 상태)
+    if (ctx.play_id.empty()) return;            // 연주 중인 곡을 모름
+
+    const MotionPrimitive &motion = front_motion.value();
+    if (motion.type != MotionType::DRUM) return;
+    if (motion.flag != PlayFlag::PLAYING) return;           // START/END는 재개 지점이 없음
+    if (motion.robotic_drum_score.size() < 2) return;
+
+    // robotic_drum_score는 악보 줄(DrumEvent) window:
+    // [0]은 직전 이벤트(이미 타격 완료), [1]이 아직 안 친 첫 이벤트
+    ctx.pause_point.play_id = ctx.play_id;
+    ctx.pause_point.bar = static_cast<int>(motion.robotic_drum_score[1].bar);
+    ctx.pause_point.valid = true;
+
+    std::cerr << "[MotionPlanner] 재개 지점 저장: id=" << ctx.pause_point.play_id
+              << ", bar=" << ctx.pause_point.bar << "\n";
 }
 
 // ===== log =====
@@ -132,8 +174,12 @@ void MotionPlanner::record_command(const ParsedCommand& cmd) {
             case Opcode::POSE:    return "POSE";
             case Opcode::HIT:     return "HIT";
             case Opcode::PLAY:    return "PLAY";
+            case Opcode::PLAY_CTRL: return "PLAY_CTRL";
             case Opcode::START:   return "START";
             case Opcode::READY:   return "READY";
+            case Opcode::PAUSE:   return "PAUSE";
+            case Opcode::RESUME:  return "RESUME";
+            case Opcode::GET_STATUS: return "GET_STATUS";
             case Opcode::QUIT:    return "QUIT";
             case Opcode::UNKNOWN: return "UNKNOWN";
             default:              return "UNKNOWN";

@@ -71,6 +71,11 @@ std::vector<MotionPrimitive> BehaviorPlanner::generate_motion_sequence(const Par
         case Opcode::POSE:    return handle_pose(parsed.args);
         case Opcode::HIT:     return handle_hit(parsed.args);
         case Opcode::PLAY:    return handle_play(parsed.args);
+        case Opcode::PAUSE: {
+            handle_pause();
+            return sequence;
+        }
+        case Opcode::RESUME:  return handle_resume();
         case Opcode::PLAY_CTRL: {
             handle_play_ctrl(parsed.args);
             return sequence;
@@ -381,13 +386,52 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_hit(const std::vector<std::
 
 // PLAY score_name : 드럼 연주
 std::vector<MotionPrimitive> BehaviorPlanner::handle_play(const std::vector<std::string>& args) {
+    return make_play_sequence(args[0], 0);
+}
+
+// PAUSE : 연주 일시정지. 재개 지점을 저장하는 abort 경로로 보낸다.
+void BehaviorPlanner::handle_pause() {
+    if (ctx.robot_state.load() != RobotState::PLAYING) {
+        std::cerr << "[BehaviorPlanner] PAUSE rejected: only allowed in PLAYING\n";
+        return;
+    }
+
+    ctx.pause_requested = true;
+    ctx.play_abort = true;
+    std::cerr << "[BehaviorPlanner] 일시정지 요청 -> 재개 지점 저장 후 ready 복귀\n";
+}
+
+// RESUME : 저장된 재개 지점부터 다시 연주
+std::vector<MotionPrimitive> BehaviorPlanner::handle_resume() {
+    std::vector<MotionPrimitive> sequence;
+    if (ctx.robot_state.load() != RobotState::IDLE) {
+        std::cerr << "[BehaviorPlanner] RESUME rejected: only allowed in IDLE\n";
+        return sequence;
+    }
+
+    std::string resume_id;
+    int resume_bar = 0;
+    {   // play_mutex는 이 블록 안에서만 잡는다
+        std::lock_guard<std::mutex> lock(ctx.play_mutex);
+        if (!ctx.pause_point.valid) {
+            std::cerr << "[BehaviorPlanner] RESUME rejected: 저장된 재개 지점이 없습니다\n";
+            return sequence;
+        }
+        resume_id = ctx.pause_point.play_id;
+        resume_bar = ctx.pause_point.bar;
+    }
+
+    std::cerr << "[BehaviorPlanner] 재개: id=" << resume_id << ", bar=" << resume_bar << "\n";
+    return make_play_sequence(resume_id, resume_bar);
+}
+
+// 악보를 읽어 연주 모션 시퀀스를 만든다. start_bar > 0 이면 그 마디부터 시작(재개).
+std::vector<MotionPrimitive> BehaviorPlanner::make_play_sequence(const std::string& id, int start_bar) {
     std::vector<MotionPrimitive> sequence;
     if (ctx.robot_state.load() != RobotState::IDLE) {
         std::cerr << "[BehaviorPlanner] PLAY rejected: only allowed in IDLE\n";
         return sequence;
     }
-
-    const std::string& id = args[0];
 
     auto it = play_list.find(id);
     if (it == play_list.end()) {
@@ -406,7 +450,11 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_play(const std::vector<std:
         return sequence;
     }
 
-    audio_player.set_track(audio_name);
+    if (start_bar > 0) {
+        audio_player.clear_track();     // 재개는 무음 (음악 중간부터 재생은 미지원)
+    } else {
+        audio_player.set_track(audio_name);
+    }
 
     std::vector<DrumEvent> rds;
     DrumEvent Dummy;
@@ -448,6 +496,9 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_play(const std::vector<std:
         } else {
             DrumEvent ev;
             if (!make_drum_event(items, bpm, last_t, ev)) break;
+            if (static_cast<int>(ev.bar) < start_bar) {
+                continue;   // 재개 지점 이전 줄은 건너뜀 (bpm 줄은 위에서 계속 적용, last_t 미누적)
+            }
             rds.push_back(ev);
 
             end_idx++;
@@ -462,6 +513,11 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_play(const std::vector<std:
     }
     inputFile.close();
 
+    if (start_bar > 0 && rds.size() < 2) {
+        std::cerr << "[BehaviorPlanner] PLAY: 재개 마디(" << start_bar
+                  << ")가 악보 범위 밖입니다. 연주 없이 ready로 복귀합니다\n";
+    }
+
     MotionPrimitive end; end.type = MotionType::DRUM; end.flag = PlayFlag::END;
     sequence.push_back(end);
 
@@ -474,6 +530,12 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_play(const std::vector<std:
         set_last_q_target(ready_it->second);
     } else {
         std::cerr << "[BehaviorPlanner] PLAY: 'ready' pose not found; last_q_target 미갱신\n";
+    }
+
+    {   // play_mutex는 이 블록 안에서만 잡는다 (lock_guard가 '}'에서 unlock)
+        std::lock_guard<std::mutex> lock(ctx.play_mutex);
+        ctx.play_id = id;
+        ctx.pause_point.valid = false;      // 새 연주 시작 -> 이전 재개 지점 폐기
     }
 
     ctx.robot_state = RobotState::PLAYING;
@@ -491,6 +553,7 @@ void BehaviorPlanner::handle_play_ctrl(const std::vector<std::string>& args) {
     const std::string& ctrl = args[0];
 
     if (ctrl == "stop") {
+        ctx.pause_requested = false;    // stop은 재개 지점을 남기지 않는다
         ctx.play_abort = true;
         std::cerr << "[BehaviorPlanner] 연주 중지 요청 -> 잔여 모션 폐기 후 ready 복귀\n";
     }

@@ -53,10 +53,13 @@ private:
     std::vector<MotionPrimitive> handle_pose(const std::vector<std::string>& args);
     std::vector<MotionPrimitive> handle_hit(const std::vector<std::string>& args);
     std::vector<MotionPrimitive> handle_play(const std::vector<std::string>& args);
+    void handle_pause();
+    std::vector<MotionPrimitive> handle_resume();
     void handle_play_ctrl(const std::vector<std::string>& args);
     std::vector<MotionPrimitive> handle_quit();
 
     // 헬퍼
+    std::vector<MotionPrimitive> make_play_sequence(const std::string& id, int start_bar);
     MotionPrimitive make_translate(const std::vector<double>& q_target, double t_total, TrajectoryProfile profile = TrajectoryProfile::COSINE);
     void set_last_q_target(const std::vector<double>& q);
     MotionPrimitive make_drum_hit(double t, int note_num);
