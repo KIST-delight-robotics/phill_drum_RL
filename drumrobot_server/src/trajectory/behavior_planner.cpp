@@ -425,6 +425,20 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_resume() {
     return make_play_sequence(resume_id, resume_bar);
 }
 
+// 재개 구간에서 해당 손의 첫 타격 악기 번호를 찾는다. 없으면 0.
+static int find_first_note(const std::vector<DrumEvent>& rds, bool is_right) {
+    for (size_t i = 1; i < rds.size(); i++) {
+        int note = is_right ? rds[i].note_num_R : rds[i].note_num_L;
+        if (note == 5 && !rds[i].is_closed_hihat) {
+            note = 9;   // 오픈 하이햇
+        }
+        if (note != 0) {
+            return note;
+        }
+    }
+    return 0;
+}
+
 // 악보를 읽어 연주 모션 시퀀스를 만든다. start_bar > 0 이면 그 마디부터 시작(재개).
 std::vector<MotionPrimitive> BehaviorPlanner::make_play_sequence(const std::string& id, int start_bar) {
     std::vector<MotionPrimitive> sequence;
@@ -516,6 +530,17 @@ std::vector<MotionPrimitive> BehaviorPlanner::make_play_sequence(const std::stri
     if (start_bar > 0 && rds.size() < 2) {
         std::cerr << "[BehaviorPlanner] PLAY: 재개 마디(" << start_bar
                   << ")가 악보 범위 밖입니다. 연주 없이 ready로 복귀합니다\n";
+    }
+
+    if (start_bar > 0 && rds.size() >= 2) {
+        // 준비 자세는 타격 없이 악기 위에 대기해야 하므로, 재개 시 init_note를
+        // 곡 도입부 설정값이 아닌 재개 구간의 첫 타격 악기로 바꾼다.
+        int first_note_r = find_first_note(rds, true);
+        int first_note_l = find_first_note(rds, false);
+        if (first_note_r != 0) sequence[0].init_note_r = first_note_r;
+        if (first_note_l != 0) sequence[0].init_note_l = first_note_l;
+        std::cerr << "[BehaviorPlanner] 재개 준비 위치: R=" << sequence[0].init_note_r
+                  << ", L=" << sequence[0].init_note_l << "\n";
     }
 
     MotionPrimitive end; end.type = MotionType::DRUM; end.flag = PlayFlag::END;
