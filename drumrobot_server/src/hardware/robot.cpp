@@ -541,6 +541,7 @@ void Robot::set_dxl_initial_pose() {
     } else {
         printf("[Robot] -------------- Dynamixel moving to initial pose\n");
     }
+    dxl_sync_write->clearParam();
 
     // 모터가 초기 위치에 도착할 때까지 대기
     usleep((total_time + 200) * 1000);

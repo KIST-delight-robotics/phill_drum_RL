@@ -113,8 +113,8 @@
             "tx_pdo_ids[3]": "0x507",
             "rx_pdo_ids[0]": "0x187",
             "rx_pdo_ids[1]": "0x287",
-            "control_kp": 60.0,
-            "control_kd": 1.0,
+            "control_kp": 40.0,
+            "control_kd": 4.0,
             "gear_ratio": 35
         },
         {
@@ -132,8 +132,8 @@
             "tx_pdo_ids[3]": "0x508",
             "rx_pdo_ids[0]": "0x188",
             "rx_pdo_ids[1]": "0x288",
-            "control_kp": 60.0,
-            "control_kd": 1.0,
+            "control_kp": 40.0,
+            "control_kd": 4.0,
             "gear_ratio": 35
         },
         {
