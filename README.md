@@ -717,39 +717,316 @@ MIT 송수신 경로 전체 · MIT 진입 절차 · 게인 램프 · ERPM→rad/
 
 ---
 
-## 실기 브링업 순서
+## 실기 브링업 절차
 
-정책부터 켜지 않습니다. 네 단계로 올립니다.
+MIT 모드는 **실기에서 한 번도 돌아간 적이 없습니다.** 정책부터 켜지 않고
+**서보 → MIT → 연주 → 정책** 네 세션으로 올립니다.
 
-| 단계 | 설정 | 확인할 것 |
-|---|---|---|
-| **0** 기존 서보 | `tmotor_mit: false`, 정책 OFF | 예전과 같이 연주되는가. `HIT|snare` 타격 위치 |
-| **1** MIT 정지 | `tmotor_mit: true`, 정책 OFF | 떨림 없이 버티는가. **토크 측정** |
-| **2** MIT 연주 | 위와 같음 | 0단계와 같은 소리·자세. 중력 처짐 없는가 |
-| **3** 정책 ON | `policy.onnx` 복구 | 소유권 전환 경계, 워치독 |
+| 세션 | 설정 | 하드웨어 | 목적 |
+|---|---|---|---|
+| **1** | `tmotor_mit: false` · 정책 OFF | 모터 1개 (벤치) | 기존 동작 회귀 확인 |
+| **2** | `tmotor_mit: true` · 정책 OFF | 모터 1개 (벤치) | MIT 첫 가동 + **토크 측정** |
+| **3** | `tmotor_mit: true` · 정책 OFF | 전 모터 (로봇) | MIT 개루프 연주 + **타격 위치** |
+| **4** | `tmotor_mit: true` · 정책 ON | 전 모터 (로봇) | 정책 가동 |
 
-**정책 끄는 법** — 코드 수정 없이 파일 이름만 바꿉니다:
+> 세션마다 바뀌는 파일은 **`config/motors.json` 2번째 줄 하나**뿐입니다.
+> 정책은 파일 이름으로 켜고 끕니다.
+
+### 공통 주의
+
+- **모터를 단단히 고정하세요.** 손으로 미는 측정이 있습니다
+- 중단: `QUIT` → 안 되면 **전원 차단**. 스위치를 손 닿는 곳에
+- MIT 모드에서는 **토크 초과 차단이 로그만 남기고 정지시키지 않습니다**
+
+---
+
+### 최초 1회 — 새 머신에서 시작할 때
 
 ```bash
+git clone https://github.com/KIST-delight-robotics/phill_drum_RL.git
+cd phill_drum_RL
+
+# ONNX Runtime 받기 (네트워크 필요, ~28MB, sha256 검증)
+bash drumrobot_server/lib/onnxruntime/fetch.sh
+
+make
+mkdir -p drumrobot_server/log
+
+# 세션 1~3 동안 정책을 꺼둡니다
 mv drumrobot_server/data/policy/policy.onnx \
    drumrobot_server/data/policy/policy.onnx.off
 ```
 
-ONNX 세션 생성이 실패해 `policy_ready` 가 서지 않고, 정책 스레드가 아예 생성되지 않습니다.
+**오프라인 머신이면** — 다른 머신에서 받은 `drumrobot_server/lib/onnxruntime/{include,lib}`
+두 디렉터리를 복사하세요. `.gitignore` 에 있어 git 으로는 가지 않습니다.
 
-**첫 정책 시험** — 곡을 끝까지 들을 필요 없습니다. 15초면 진입·이탈 경계를 둘 다 봅니다:
+**hostname 확인** — `config/can_ports.json` 에 등록돼 있어야 CAN 포트 USB 리셋이 됩니다.
+없으면 `Unrecognized hostname ... skip CAN reset` 이 뜨고 그대로 진행합니다(치명적이지 않음).
+
+---
+
+### 세션 1 — 서보 모드 · 모터 1개
+
+기존 코드와 같은 상태입니다. 이식이 기존 동작을 깨지 않았는지 봅니다.
+
+**고칠 파일** — `drumrobot_server/config/motors.json` 2번째 줄
+
+```json
+"tmotor_mit": false,
+```
+
+**터미널 A** — 모터를 고정하고 전원을 켠 뒤
+
+```bash
+cd <저장소 최상위>
+make run
+```
+
+기대 출력:
 
 ```
+[Robot] TMotor 제어 모드: VEL
+[Robot] --------------> CAN NODE ID 4 Connected. Joint 4: right_elbow
+[Robot] CAN NODE ID 0 Not Connected. ...        ← 나머지는 이게 정상
+[Robot] TMotor Set Zero
+[main] 정책을 켜지 못했습니다. 개루프로 연주합니다.
+```
+
+**터미널 B**
+
+```bash
+cd <저장소 최상위>
+python3 drumrobot_client/main.py
+```
+
+```
+START                       # 토크 ON. 모터는 제자리 유지 (안 움직이는 게 정상)
+READY
+MOVE|right_elbow|100|3.0    # 3초에 걸쳐 10도
+MOVE|right_elbow|90|3.0     # 원위치
+QUIT
+```
+
+**통과 조건** — 연결한 모터가 `Connected`, `START` 후 조용히 버팀,
+`MOVE` 가 부드럽게 이동, `control_queue underflow` 반복 없음.
+
+> `right_elbow`(id 4) 같은 **팔 모터**를 권합니다. TMotor 7개 중 6개가 AK70-10 입니다.
+
+---
+
+### 세션 2 — MIT 모드 · 모터 1개
+
+**MIT 가 실기에서 도는 첫 순간입니다.** 이 세션의 목적은 토크 측정입니다.
+
+**고칠 파일** — `motors.json` 2번째 줄 (되돌립니다). 재빌드 불필요.
+
+```json
+"tmotor_mit": true,
+```
+
+**터미널 A**
+
+```bash
+make run
+# [Robot] TMotor 제어 모드: MIT      ← MIT 로 떠야 합니다
+```
+
+**터미널 B**
+
+```
+START      # MIT 진입 + 게인 램프 0→1 (0.5초)
+```
+
+여기서 **아무것도 하지 말고 10초쯤 지켜봅니다.** 램프 중에는 목표가 실측 위치로
+고정되므로 안 움직이는 것이 정상입니다.
+
+> **즉시 전원 차단** — 고주파 떨림·윙윙거림(게인이 예상보다 크게 걸린 것),
+> 모터가 스스로 움직이려 함, `토크 한계 근접` 로그가 계속 뜸.
+
+#### 토크 측정 — 미검증 상수 3개를 한 번에
+
+1. 모터 출력축을 손으로 **약 3도(0.05 rad) 밀어** 5초쯤 잡고 있는다
+2. 손을 떼고 `QUIT`
+
+```bash
+awk -F, '$1==4 && $2==3 {print $5, $6}' \
+  drumrobot_server/log/log_*_motors.csv | sort -g -k1 | tail -5
+#         ↑ err[rad]  ↑ torque[N·m]      $1 은 모터 id, $2==3 은 MIT
+```
+
+`Kp_실효 = 토크 ÷ err` — 둘 다 출력축 기준이라 기어비 환산이 필요 없습니다.
+
+| err 0.05 rad 에서 토크 | Kp_실효 | 판정 |
+|---|---|---|
+| **약 5.0 N·m** | 100 | **정상** — 게인·토크 디코딩 둘 다 맞음 |
+| 약 10 N·m | 200 | 게인 2배 — `mit_kp_max` 가 실제와 다름 |
+| 약 2.5 N·m | 50 | 게인 절반 |
+| 0 또는 이상값 | — | `mit_t_limit` 토크 디코딩 문제 |
+
+이 측정 하나로 **`mit_kp_max` · `mit_kd_max` · `mit_t_limit` 이 동시에 검증됩니다.**
+어긋나면 그 비율만큼 `motors.json` 의 `mit_kp` 를 보정합니다.
+
+속도(`mit_v_limit`)도 같은 로그에서 봐 두세요 — 손으로 천천히 돌렸을 때 값이
+상식적인지. **어떤 안전 검사도 속도를 보지 않으므로** 눈으로 보는 것이 유일한 방법입니다.
+
+---
+
+### 세션 3 — MIT 로 기존 연주 · 로봇 전체
+
+**설정 변경 없습니다.** 세션 2 상태 그대로, 모터를 전부 연결하고
+**고정 키를 꽂은 채** 전원을 켭니다.
+
+```bash
+make run     # 13개 관절 전부 Connected 여야 합니다
+```
+
+```
+START            # 토크 ON — 터미널 A 에 키 제거 안내가 나옵니다
+```
+
+> **여기서 고정 키를 전부 제거합니다.** 토크가 자세를 붙들고 있을 때 뽑아야 합니다.
+> `Init` 상태에서는 팔을 움직이는 명령이 전부 거부되니 안전합니다.
+
+```
+READY
+POSE|ready
+HIT|snare        # ★ 타격 위치를 눈으로 확인 (아래)
 PLAY|BF
-PLAY_CTRL|speed|0.5     # 절반 속도가 더 안전합니다
-   ... 15초 ...
-PLAY_CTRL|stop
+PLAY_CTRL|stop   # 이상하면 즉시
+QUIT
 ```
 
-곡은 **`BF`(BasicFillin)** 를 권합니다. 학습이 만들지 않는 밀도(간격 < 105ms)가
-48구간 있지만 **전부 90ms 로 가장 완만**하고, 오디오가 없어 변수가 하나 줄어듭니다.
-`WS`(최소 45ms)·`DS`(60ms) 는 첫 시험에 피하세요. `M1` 은 정책이 MIDI 를,
-발·머리가 txt 악보를 읽어 **서로 다른 음악을 연주할 수 있으므로** MIDI 경로 시험 전용입니다.
+**통과 조건** — 세션 1(서보)과 같은 소리·같은 자세, **팔이 처지지 않음**,
+최대 토크가 `mit_torque_safety`(팔 24 N·m)에 여유 있게 못 미침.
+
+```bash
+awk -F, '$2==3 {t=($6<0?-$6:$6); if(t>m[$1]) m[$1]=t}
+     END{for(i in m) printf "  id %s  최대 %.2f Nm\n", i, m[i]}' \
+  drumrobot_server/log/log_*_motors.csv
+```
+
+#### HIT|snare 타격 위치 — 스틱 길이가 여기서 확정됩니다
+
+| 결과 | 뜻 | 조치 |
+|---|---|---|
+| 중앙을 잘 침 | 373 이 맞다 | **유지.** 학습 `specs.py` 의 `tip_offset` 을 0.373 으로 고쳐 재학습 |
+| 12mm 깊게/넘어가게 침 | 385 가 맞다 | `kinematics.json` 73줄을 0.385 로. 재학습 불필요 |
+
+---
+
+### 세션 4 — 정책 ON · 로봇 전체
+
+세션 1~3 이 전부 통과한 뒤에만 진행합니다.
+
+```bash
+mv drumrobot_server/data/policy/policy.onnx.off \
+   drumrobot_server/data/policy/policy.onnx
+
+make run
+```
+
+**기동 시 이 줄을 반드시 확인하세요:**
+
+```
+[PolicyRunner] 준비 완료 — 주기 15ms (66.6667Hz), stride 3, 모델 ...
+```
+
+`[main] 정책을 켜지 못했습니다` 가 나오면 **바로 위에 이유가 찍힙니다** —
+주기 불일치 / 팔 모터 결번 / 세션 생성 실패 / MIT 아님.
+
+```
+START → 고정 키 제거 → READY → POSE|ready
+
+PLAY|BF
+PLAY_CTRL|speed|0.5      # 절반 속도가 안전합니다
+
+# [TrajectoryGenerator] 팔 0~8 소유권을 정책에 넘겼습니다
+#    ... 15초 지켜본 뒤 ...
+PLAY_CTRL|stop
+# [TrajectoryGenerator] 팔 0~8 소유권을 되받았습니다
+QUIT
+```
+
+**곡을 끝까지 들을 필요 없습니다.** 15초면 소유권 **인계와 반납 두 경계**를
+다 시험합니다 — 가장 위험한 순간들입니다.
+
+속도 배율은 정책의 `next_hits` 에도 반영되어 타격 간격이 2배로 벌어집니다.
+밀도 위반이 사라지고 팔도 천천히 움직입니다.
+
+**멈출 신호** — `[Controller] 정책 워치독`, `[PolicyRunner] obs 생성 실패` 반복,
+팔이 드럼이 아닌 곳으로 감, **소유권 전환 순간에 자세가 튐**.
+
+종료 후 터미널에 요약이 찍힙니다:
+
+```
+[PolicyRunner] N주기  평균 xx us  p50 xx  p99 xx  최대 xx us  (예산 15000us)
+```
+
+최대가 15,000 µs 를 넘지 않으면 정상입니다 (예상 ~20 µs).
+
+---
+
+### 곡 선택
+
+| id | 악보 | 길이 | 105ms 미만 구간 | 최소 간격 | 오디오 |
+|---|---|---|---|---|---|
+| **BF** | BasicFillin | 144 s | 48개 | **90 ms** | — |
+| BI | BabyINeedYou | 138 s | 30개 | 90 ms | BI.wav |
+| DS | DrumSolo | 125 s | 8개 | 60 ms | — |
+| TI | ThisIsMe | 243 s | 2개 | 75 ms | TIM.wav |
+| WS | WhySo | 389 s | 10개 | **45 ms** | — |
+| TY | ToYou | 554 s | 4개 | 90 ms | — |
+
+학습은 타격 간격을 **105ms 미만으로 만들지 않습니다**(`min_gap = 2×hit_window_step+1`).
+그보다 촘촘하면 정책이 본 적 없는 밀도입니다. 모든 곡에 조금씩 있고,
+**개수보다 얼마나 촘촘한가**가 중요합니다.
+
+**`BF` 를 권합니다** — 위반 48구간이 전부 90ms 로 가장 완만하고(하한에서 1스텝 부족),
+오디오가 없어 변수가 하나 줄어듭니다.
+
+**`M1` 은 쓰지 마세요** — `score` 와 `midi` 를 둘 다 갖고 있어, 정책은 MIDI 를
+발·머리는 txt 악보를 읽습니다(`behavior_planner.cpp:533`). 두 악보가 다르면
+**팔과 발이 서로 다른 음악을 연주합니다.** MIDI 경로 시험 전용 항목입니다.
+
+---
+
+### 벤치(모터 1개)에서 알아둘 것
+
+**되는 명령**
+
+| 명령 | |
+|---|---|
+| `START` `READY` `QUIT` | 상태 전이 |
+| `MOVE\|<관절>\|<도>\|<초>` | **벤치 주력** |
+| `POSE\|ready` | 연결된 모터만 움직임 |
+| `HIT` `PLAY` | ❌ IK 가 양팔 전체를 풀어야 함 — 무의미 |
+
+**왜 모터 하나로 되나** — 미연결 모터는 `robot.initialize()` 가 맵에서 제거하고,
+송신 게이트(`all_tmotors_received`)는 맵을 순회하므로 연결된 것만 기다립니다.
+다이나믹셀 포트가 없어도 해당 모터를 지우고 계속 진행합니다.
+
+**왜 `START` 해도 안 움직이나** — `home` 이 모든 TMotor 의 `initial_joint_angle` 과
+같고, `Set Zero` 가 시동 위치를 그 값으로 잡습니다. 즉 "지금 자리를 유지하라"가 됩니다.
+
+**안 움직일 때 — 가동 범위** — `Set Zero` 가 **시동 순간의 물리 위치**를 기준으로
+잡습니다. `right_elbow` 범위가 `0~140.1도` 이고 시동 위치가 `90도` 가 되므로,
+실제로는 **시동 위치에서 −90°~+50°** 안에서만 움직입니다. 밖을 명령하면
+`범위 초과 차단` 로그가 뜨고 조용히 건너뜁니다.
+
+---
+
+### 로그 컬럼 — `drumrobot_server/log/log_MMDD_HHmm_motors.csv`
+
+| # | 이름 | 뜻 |
+|---|---|---|
+| 1 | `id` | 모터 id (0 허리 · 1~6 팔 · 7,8 손목 · 9,10 발) |
+| 2 | `mode` | 1 위치 · 2 속도 · **3 MIT** |
+| 3 | `desired` | 목표 위치 [rad, 출력축] |
+| 4 | `actual` | 실측 위치 [rad, 출력축] |
+| 5 | `err` | `desired − actual` — **토크 측정에 쓰는 값** |
+| 6 | `current/torque` | MIT 는 **토크 [N·m]**, 서보는 전류 [A] — **의미가 다릅니다** |
+| 7 | `input` | MIT 는 게인 램프값 0~1 |
+
 
 ---
 
