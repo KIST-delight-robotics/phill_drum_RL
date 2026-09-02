@@ -67,7 +67,8 @@ void Controller::send_loop() {
                 // 첫 정책 소유 setpoint 가 도착하기 약 100ms 전부터 정책이 돈다.
                 // 그 선행 구간이 슬롯을 채워 두고, ObsBuilder 의 팁·손목 이전값도
                 // 예열해 준다 (첫 스텝의 유한차분 속도가 0 이 되지 않는다).
-                if (ctx.policy_active.load() && t % POLICY_TICK_STRIDE == 0) {
+                if ((ctx.policy_active.load() || ctx.policy_dry_run.load())
+                    && t % POLICY_TICK_STRIDE == 0) {
                     ctx.policy_cv.notify_one();
                 }
 
@@ -272,10 +273,22 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
         }
  
         if (mode == ControlMode::MIT) {
-            // 게인 램프 중에는 p_des를 실측으로 고정한다.
-            // 목표 자세를 물린 채 게인을 올리면 그 오차만큼 즉시 토크가 터진다.
+            // 게인 램프 중에는 목표를 실측에서 궤적값으로 '끌고 간다'.
+            //
+            // 이전에는 (ramp < 1.0) ? 실측 : 궤적값 이었다. 램프 동안은 오차가 0 이라
+            // 안전했지만, 램프가 1.0 이 되는 순간 목표가 궤적값으로 점프해
+            // 그때까지 숨어 있던 오차가 최대 게인과 함께 한꺼번에 드러났다.
+            //   실측 2026-09-02: 시동 후 축이 28도 돌아간 상태에서 START ->
+            //   램프 완료 순간 Kp 100 x 0.49 rad = 49 N·m 요구 -> 모터가 28도 스윕.
+            //
+            // 선형 보간으로 바꾸면 게인과 목표가 같은 속도로 올라가므로 토크가
+            // 램프 내내 완만하게 붙는다 (램프 중간에서 오차 1/2 x 게인 1/2 = 토크 1/4).
+            // 램프가 끝나면 목표는 이미 궤적값이라 절벽이 없다.
+            //
+            // 영점이 어긋났든 사람이 팔을 건드렸든, 시작 시점의 오차를 안전하게 흡수한다.
             double ramp = ctx.gain_ramp.load();
-            double p_des = (ramp < 1.0) ? tmotor->current_position : motor_position;
+            double p_des = tmotor->current_position
+                         + ramp * (motor_position - tmotor->current_position);
 
             mit_codec.encodeCommand(&frame, tmotor->node_id, 8,
                 static_cast<float>(p_des),

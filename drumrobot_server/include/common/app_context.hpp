@@ -38,6 +38,13 @@ struct AppContext {
     std::atomic<bool>     policy_active{false}; // 정책이 팔 0~8을 소유하는 구간인지
     std::atomic<bool>     policy_fault{false};  // 워치독 실패 / 추론 타임아웃
 
+    // 건식 시험. 정책 스레드를 돌려 배선·타이밍만 확인하고 팔에는 아무것도 쓰지 않는다.
+    //   - 팔 모터 결번을 허용한다 (벤치에서 모터 1개만 연결한 상태를 위해)
+    //   - 악보 없이 next_hits 를 0 으로 채워 obs 를 조립한다
+    //   - policy_active 는 서지 않으므로 merge 가 일어나지 않는다 → 모터 무영향
+    // motors.json 최상위 "policy_dry_run" 으로 켠다.
+    std::atomic<bool>     policy_dry_run{false};
+
     // PolicyRunner 가 세션·ObsBuilder 초기화를 마치면 true. 이게 false 면
     // policy_active 를 절대 세우지 않는다 — 세우면 팔이 주인 없이 남는다.
     std::atomic<bool>     policy_ready{false};

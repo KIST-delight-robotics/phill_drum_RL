@@ -40,6 +40,7 @@ void Robot::init_motor_from_json() {
     json config = json::parse(f);
 
     use_mit = config.value("tmotor_mit", true);
+    policy_dry_run = config.value("policy_dry_run", false);
     std::cout << "[Robot] TMotor 제어 모드: " << (use_mit ? "MIT" : "SERVO") << "\n";
 
     for (auto &m : config["motors"]) {
@@ -114,7 +115,27 @@ void Robot::set_motors_socket() {
     // 연결 안 된 모터는 마지막 시도 소켓 값이 남지만, 함수 끝에서 motors map에서 erase되므로 이후 사용되지 않음.
     struct can_frame frame;
     can.setSocketsTimeout(0, 10000);    // 타임아웃 10ms 설정
-    can.clearReadBuffers();
+
+    can.clearReadBuffers();   // 묵은 프레임을 먼저 버린다
+
+    // MIT 모드는 command 프레임에 대한 응답으로만 피드백을 준다.
+    // 탐색이 수동(읽기만)이므로, 먼저 제어 모드 진입 프레임을 뿌려 응답을 유도한다.
+    // 이걸 빼면 스스로 스트리밍하지 않는 모터를 놓친다.
+    //
+    // ★ 순서 주의: clearReadBuffers 는 반드시 전송 '전' 이다. 뒤에 두면
+    //   방금 유도한 응답을 그대로 버린다.
+    if (use_mit) {
+        std::map<std::string, int> pre = can.getSocket();
+        for (const auto &sk : pre) {
+            for (auto &[id, motor] : motors) {
+                auto tm = std::dynamic_pointer_cast<TMotor>(motor);
+                if (!tm) continue;
+                mit_codec.encodeEnterControlMode(tm->node_id, &frame);
+                can.sendFrame(sk.second, frame);
+            }
+        }
+        usleep(100000);   // 100ms — 응답이 버퍼에 쌓일 시간 (여기서 비우면 안 된다)
+    }
 
     // 모든 소켓에 대해 연결을 확인
     std::map<std::string, int> sockets = can.getSocket();
@@ -153,7 +174,13 @@ void Robot::set_motors_socket() {
         for (auto &[id, motor] : motors) {
             for (auto &frame : temp_frames) {
                 if (std::shared_ptr<TMotor> tmotor = std::dynamic_pointer_cast<TMotor>(motor)) {
-                    if ((frame.can_id & 0xFF) == tmotor->node_id) {
+                    // 식별자 위치가 모드마다 다르다.
+                    //   서보 : can_id 하위 바이트
+                    //   MIT  : data[0]        (motor_codec.cpp::decodeFeedback 주석 참조)
+                    // 이 분기를 빼면 MIT 모드에서 TMotor 를 영원히 못 찾는다.
+                    const bool match = use_mit ? (frame.can_dlc > 0 && frame.data[0] == tmotor->node_id)
+                                               : ((frame.can_id & 0xFF) == tmotor->node_id);
+                    if (match) {
                         tmotor->is_connected = true;
                     }
                 } else if (std::shared_ptr<MaxonMotor> maxon = std::dynamic_pointer_cast<MaxonMotor>(motor)) {

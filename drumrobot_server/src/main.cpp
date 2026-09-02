@@ -38,6 +38,7 @@ int main(int argc, char* argv[]) {
     Robot robot;
     robot.initialize();
     ctx.tmotor_mit = robot.use_mit;     // motors.json 최상위 "tmotor_mit"
+    ctx.policy_dry_run = robot.policy_dry_run;
 
     AudioPlayer audio_player;
     audio_player.initialize();

@@ -38,6 +38,7 @@ public:
 
     // motors.json 최상위 "tmotor_mit". false 면 팔 TMotor가 서보 모드로 동작한다.
     bool use_mit = true;
+    bool policy_dry_run = false;   // motors.json 최상위. 건식 시험 (app_context.hpp 참조)
 
     // 팔 9관절의 시간 정합 스냅샷. recv_loop이 발행하고 policy_thread가 읽는다.
     JointSnapshot joint_snapshot;

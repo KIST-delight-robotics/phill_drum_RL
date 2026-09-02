@@ -100,9 +100,17 @@ bool PolicyRunner::initialize() {
     }
 
     // ---- 관절 한계 (모터 id 순서) ----
+    const bool dry = ctx.policy_dry_run.load();
+    int missing = 0;
     for (int j = 0; j < JointID::NUM_ARM; ++j) {
         auto it = robot.motors.find(j);
         if (it == robot.motors.end()) {
+            if (dry) {
+                // 건식 시험: 결번을 허용하고 넓은 한계를 준다. obs 의 그 관절은 0 이므로
+                // 값은 무의미하지만 배선·타이밍은 검증된다. merge 는 일어나지 않는다.
+                q_min_[j] = -M_PI; q_max_[j] = M_PI; ++missing;
+                continue;
+            }
             std::cerr << "[PolicyRunner] 팔 모터 " << j << " 결번 — 정책을 켜지 않습니다\n";
             return false;
         }
@@ -184,6 +192,16 @@ bool PolicyRunner::initialize() {
     sess_ = std::move(sess);
     ctx.policy_ready = true;
 
+    if (dry) {
+        std::cerr << "\n"
+                  << "  ============================================================\n"
+                  << "   건식 시험 모드 (policy_dry_run)\n"
+                  << "     팔 모터 결번 " << missing << "개 허용\n"
+                  << "     악보 없이 next_hits=0 으로 obs 조립\n"
+                  << "     merge 하지 않음 -> 모터에 지령이 나가지 않습니다\n"
+                  << "     배선·주기·추론지연만 검증합니다\n"
+                  << "  ============================================================\n\n";
+    }
     std::cerr << "[PolicyRunner] 준비 완료 — 주기 " << cfg.policy_dt * 1000.0 << "ms ("
               << 1.0 / cfg.policy_dt << "Hz), stride " << cfg.policy_tick_stride
               << ", 모델 " << model_path_ << "\n";
@@ -210,7 +228,8 @@ void PolicyRunner::run() {
         }
 
         if (!ctx.running.load()) break;
-        if (!ctx.policy_active.load()) continue;
+        const bool dry = ctx.policy_dry_run.load();
+        if (!dry && !ctx.policy_active.load()) continue;
 
         // 곡이 바뀌었으면 상태머신을 초기화한다.
         const uint64_t ep = ctx.policy_epoch.load();
@@ -248,7 +267,15 @@ bool PolicyRunner::step(uint64_t t) {
     // ---- obs ----
     const uint64_t tb0 = now_ns();
     PolicyObs obs;
-    if (!obs_builder.build(snap, t_score, speed, score, obs)) {
+    bool ok_obs;
+    if (ctx.policy_dry_run.load()) {
+        // 악보가 없어도 조립·추론이 돌게 한다. 값은 무의미하고 타이밍만 본다.
+        static const std::array<float, ObsBuilder::NUM_HITS * ObsBuilder::CHANNELS> zero_nh{};
+        ok_obs = obs_builder.build_from(snap, t_score, zero_nh.data(), obs);
+    } else {
+        ok_obs = obs_builder.build(snap, t_score, speed, score, obs);
+    }
+    if (!ok_obs) {
         // 악보가 없거나 FK 실패. 슬롯을 갱신하지 않는다.
         static int warn = 0;
         if (warn++ % 200 == 0) std::cerr << "[PolicyRunner] obs 생성 실패\n";
