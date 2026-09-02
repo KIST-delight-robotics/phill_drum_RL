@@ -26,9 +26,13 @@ void MotionPlanner::run() {
             }
 
             if (auto motion = motion_queue.try_pop()) {
+                // recv 를 궤적 생성보다 먼저 켠다. generate_trajectory 안의 실측
+                // 동기화가 current_joint_angle 을 읽는데, 이 값은 recv_loop 만
+                // 채운다. 순서가 뒤집히면 초기값 0 을 읽어 궤적이 0 도에서 출발한다.
+                if (!ctx.recv_active.load()) ctx.recv_active = true;
+
                 trajectory_generator.generate_trajectory(*motion);
 
-                if (!ctx.recv_active.load()) ctx.recv_active = true;
                 if (!ctx.send_active.load()) ctx.send_active = true;
                 if (ctx.play_abort.load()) abort_play_motion();
 

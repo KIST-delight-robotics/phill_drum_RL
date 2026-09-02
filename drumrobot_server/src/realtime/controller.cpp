@@ -22,6 +22,18 @@ void Controller::send_loop() {
     int cnt = 0;
 
     while (ctx.running.load()) {
+        // 피드백 예열은 send_active 와 무관하게 돈다.
+        //
+        // MIT 는 명령에 대한 응답으로만 피드백을 준다. START 의 실측 동기화가
+        // current_joint_angle 을 필요로 하므로, recv 가 켜진 시점부터 게인 0 명령을
+        // 보내 first_recv_done 을 채워 둔다. send_active 를 기다리면 교착이다 —
+        // send_active 는 첫 궤적이 생성된 뒤에 서고, 그 궤적이 실측을 필요로 한다.
+        if (ctx.recv_active.load() && ctx.tmotor_mit.load() && !all_tmotors_received()) {
+            prime_mit_feedback();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
         if (!ctx.send_active.load()) {
             if (ctx.robot_state.load() == RobotState::SHUTTINGDOWN) break;  // send_active 전 종료 상태가 되면 바로 탈출
             std::this_thread::sleep_for(std::chrono::milliseconds(10));     // send_active 전까지 대기
@@ -47,7 +59,6 @@ void Controller::send_loop() {
                 if (ctx.mit_enter_requested.exchange(false)) {
                     enter_mit_control_mode();
                 }
-                advance_gain_ramp();
 
                 // 1ms: 큐에서 새 목표값 가져오고, 맥슨 보간 1번째 송신
                 prev_point = curr_point;
@@ -137,7 +148,7 @@ bool Controller::all_tmotors_received() {
 }
 
 // MIT 제어 모드 진입. 진입 자체는 통전시키지 않는다 — 첫 command 프레임에서
-// kp/kd가 실리면서 토크가 생긴다. 그래서 gain_ramp를 0에서 시작해야 한다.
+// kp/kd 가 실리면서 토크가 생긴다. 그래서 게인 0 명령으로 피드백만 유도한다.
 void Controller::enter_mit_control_mode() {
     struct can_frame frame;
 
@@ -196,22 +207,6 @@ void Controller::prime_mit_feedback() {
     }
 }
 
-// 5ms마다 한 스텝씩 gain_ramp를 target으로 코사인 이동.
-void Controller::advance_gain_ramp() {
-    double target = ctx.gain_ramp_target.load();
-    double cur    = ctx.gain_ramp.load();
-    if (cur == target) return;
-
-    const double step = ROBOT::DT_SECOND / GAIN_RAMP_SECONDS;   // 0.005 / 0.5 = 0.01
-    double next;
-    if (cur < target) next = std::min(cur + step, target);
-    else              next = std::max(cur - step, target);
-
-    ctx.gain_ramp.store(next);
-    if (next == target) {
-        std::cout << "[Controller] gain_ramp -> " << target << "\n";
-    }
-}
 
 void Controller::send_task_1ms(int cnt) {
     double alpha = static_cast<double>(cnt + 1) / 5.0;
@@ -256,45 +251,96 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
         double motor_position  = tmotor->joint_angle_to_motor_position(point.q[id]);
         double motor_velocity = tmotor->direction_sign * point.qd[id];    // rad/s
  
+        // 토크 미인가 구간 (START 이전). 게인 0 명령만 보내 피드백을 유지한다.
+        // 목표는 실측으로 두고 안전 체크도 건너뛴다 — 오차 자체가 의미 없다.
+        //
+        // point.mode 가 아니라 tmotor_mit 로 판단한다: ControlSetPoint 의 기본 mode 는
+        // POS 이므로, mode 로 걸면 START 이전의 기본 setpoint 가 서보 위치 명령으로
+        // 나가 버린다.
+        if (ctx.tmotor_mit.load() && !point.torque_on) {
+            mit_codec.encodeCommand(&frame, tmotor->node_id, 8,
+                static_cast<float>(tmotor->current_position),
+                0.0f, 0.0f, 0.0f, 0.0f, tmotor->mit_limits());
+            robot.can.sendFrame(tmotor->socket, frame);
+            continue;
+        }
+
         // 목표값 안전 체크 (전송 전)
         double desired_joint = point.q[id];
         double diff = desired_joint - tmotor->current_joint_angle;
         if (std::abs(diff) > POS_DIFF_LIMIT) {
-            std::cerr << "[Controller] TMotor 급변 차단 (" << tmotor->name << ")"
-                      << "  desired=" << desired_joint * 180.0 / M_PI << "deg"
-                      << "  actual=" << tmotor->current_joint_angle * 180.0 / M_PI << "deg"
-                      << "  diff=" << diff * 180.0 / M_PI << "deg\n";
+            // 5ms 주기이므로 1초에 한 번. 매 틱 찍으면 초당 200줄이 되어 다른 로그를 덮는다
+            if (tmotor->guard_cnt++ % 200 == 0) {
+                std::cerr << "[Controller] TMotor 급변 차단 (" << tmotor->name << ")"
+                          << "  desired=" << desired_joint * 180.0 / M_PI << "deg"
+                          << "  actual=" << tmotor->current_joint_angle * 180.0 / M_PI << "deg"
+                          << "  diff=" << diff * 180.0 / M_PI << "deg"
+                          << "  (연속 " << tmotor->guard_cnt << "틱)\n";
+            }
+            if (ctx.tmotor_mit.load()) {
+                // MIT 는 명령에 대한 응답으로만 피드백을 준다. 여기서 그냥 continue 하면
+                // current_joint_angle 이 갱신되지 않아 diff 가 얼어붙고, 가드가 상황이
+                // 해소됐는지 알 수 없게 된다 — 스스로 풀리지 못한다.
+                //   실측 2026-09-02: 개루프 연주 중 1.355초 교착 (actual 이 한 자리도 안 변함)
+                // 서보 모드는 모터가 피드백을 스스로 뿌리므로 이 문제가 없었다.
+                //
+                // 궤적 목표는 그대로 거부하고, 실측을 목표로 보내 그 자리에 버티게 한다.
+                // p_des = 실측이므로 tau = Kd(0 - qd) — 순수 감쇠다. 거부한 명령보다
+                // 토크가 작고, 피드백이 살아 있어 다음 틱에 새 값으로 재판정한다.
+                mit_codec.encodeCommand(&frame, tmotor->node_id, 8,
+                    static_cast<float>(tmotor->current_position),
+                    0.0f,
+                    static_cast<float>(tmotor->mit_kp),
+                    static_cast<float>(tmotor->mit_kd),
+                    0.0f, tmotor->mit_limits());
+                robot.can.sendFrame(tmotor->socket, frame);
+            }
             continue;
         }
         if (desired_joint < tmotor->min_angle || desired_joint > tmotor->max_angle) {
-            std::cerr << "[Controller] TMotor 범위 초과 차단 (" << tmotor->name << ")"
-                      << "  target=" << desired_joint * 180.0 / M_PI << "deg\n";
+            if (tmotor->guard_cnt++ % 200 == 0) {
+                std::cerr << "[Controller] TMotor 범위 초과 차단 (" << tmotor->name << ")"
+                          << "  target=" << desired_joint * 180.0 / M_PI << "deg"
+                          << "  (연속 " << tmotor->guard_cnt << "틱)\n";
+            }
+            if (ctx.tmotor_mit.load()) {
+                // MIT 는 명령에 대한 응답으로만 피드백을 준다. 여기서 그냥 continue 하면
+                // current_joint_angle 이 갱신되지 않아 diff 가 얼어붙고, 가드가 상황이
+                // 해소됐는지 알 수 없게 된다 — 스스로 풀리지 못한다.
+                //   실측 2026-09-02: 개루프 연주 중 1.355초 교착 (actual 이 한 자리도 안 변함)
+                // 서보 모드는 모터가 피드백을 스스로 뿌리므로 이 문제가 없었다.
+                //
+                // 궤적 목표는 그대로 거부하고, 실측을 목표로 보내 그 자리에 버티게 한다.
+                // p_des = 실측이므로 tau = Kd(0 - qd) — 순수 감쇠다. 거부한 명령보다
+                // 토크가 작고, 피드백이 살아 있어 다음 틱에 새 값으로 재판정한다.
+                mit_codec.encodeCommand(&frame, tmotor->node_id, 8,
+                    static_cast<float>(tmotor->current_position),
+                    0.0f,
+                    static_cast<float>(tmotor->mit_kp),
+                    static_cast<float>(tmotor->mit_kd),
+                    0.0f, tmotor->mit_limits());
+                robot.can.sendFrame(tmotor->socket, frame);
+            }
             continue;
         }
  
+        tmotor->guard_cnt = 0;      // 가드를 통과했다 — 연속 카운트 리셋
+
         if (mode == ControlMode::MIT) {
-            // 게인 램프 중에는 목표를 실측에서 궤적값으로 '끌고 간다'.
+            // 게인은 고정이고 목표는 궤적값 그대로다.
             //
-            // 이전에는 (ramp < 1.0) ? 실측 : 궤적값 이었다. 램프 동안은 오차가 0 이라
-            // 안전했지만, 램프가 1.0 이 되는 순간 목표가 궤적값으로 점프해
-            // 그때까지 숨어 있던 오차가 최대 게인과 함께 한꺼번에 드러났다.
-            //   실측 2026-09-02: 시동 후 축이 28도 돌아간 상태에서 START ->
-            //   램프 완료 순간 Kp 100 x 0.49 rad = 49 N·m 요구 -> 모터가 28도 스윕.
-            //
-            // 선형 보간으로 바꾸면 게인과 목표가 같은 속도로 올라가므로 토크가
-            // 램프 내내 완만하게 붙는다 (램프 중간에서 오차 1/2 x 게인 1/2 = 토크 1/4).
-            // 램프가 끝나면 목표는 이미 궤적값이라 절벽이 없다.
-            //
-            // 영점이 어긋났든 사람이 팔을 건드렸든, 시작 시점의 오차를 안전하게 흡수한다.
-            double ramp = ctx.gain_ramp.load();
-            double p_des = tmotor->current_position
-                         + ramp * (motor_position - tmotor->current_position);
+            // 게인 램프를 쓰지 않는다. 시작 시점의 위치 오차는 궤적이 실측에서
+            // 출발하게 해서(TrajectoryGenerator::generate_trajectory 참조) 애초에
+            // 만들지 않는다. 램프는 그 오차를 늦게 드러내기만 했고, 램프가 끝나는
+            // 순간 최대 게인 x 최대 오차가 되는 절벽을 만들었다.
+            // 게인을 낮추면 그 구간에 중력에 밀리는 부작용도 있었다.
+            double p_des = motor_position;
 
             mit_codec.encodeCommand(&frame, tmotor->node_id, 8,
                 static_cast<float>(p_des),
                 0.0f,                                       // v_des = 0 (학습의 Kd는 순수 감쇠항)
-                static_cast<float>(tmotor->mit_kp * ramp),
-                static_cast<float>(tmotor->mit_kd * ramp),
+                static_cast<float>(tmotor->mit_kp),
+                static_cast<float>(tmotor->mit_kd),
                 0.0f,                                       // t_ff = 0
                 tmotor->mit_limits());
 
@@ -304,7 +350,7 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                 tmotor->current_position,
                 p_des - tmotor->current_position,
                 tmotor->current_torque_mit,     // MIT 는 전류가 아니라 토크
-                ramp
+                tmotor->mit_kp                  // 걸린 게인 (이전에는 램프 배율)
             };
             motor_log.record(values);
         } else if (mode == ControlMode::POS) {

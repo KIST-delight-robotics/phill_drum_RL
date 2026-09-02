@@ -30,9 +30,16 @@ struct AppContext {
 
     // ===== MIT 모드 =====
     std::atomic<bool>   tmotor_mit{true};       // 팔 TMotor를 MIT로 구동할지 (motors.json 최상위에서 로드)
-    std::atomic<double> gain_ramp{0.0};         // MIT 게인 배율 0->1. 토크 인가 시 코사인으로 올린다
-    std::atomic<double> gain_ramp_target{0.0};  // 목표값. send_loop이 이 값을 향해 gain_ramp를 움직인다
     std::atomic<bool>   mit_enter_requested{false};  // send_loop에게 MIT 제어 모드 진입 프레임 송신을 요청
+
+    // 토크 인가 직전에 궤적 출발점을 실측으로 맞추라는 요청.
+    //
+    // 왜 필요한가: 궤적은 last_q(초기값 = init 자세)에서 출발한다. 모터가 그 자리에
+    // 없으면 첫 목표부터 오차가 있고, MIT 는 오차가 곧 토크이므로 즉시 큰 토크가 걸린다.
+    //   실측 2026-09-02: 축이 28도 돌아간 상태에서 START -> Kp 100 x 0.49 rad = 49 N·m
+    // 실측에서 출발시키면 오차가 0 에서 시작해 3초 궤적을 따라가는 만큼만 토크가 걸린다.
+    // (서보 모드는 오차를 속도로 바꾸므로 이 문제가 드러나지 않았다.)
+    std::atomic<bool>   sync_last_q_requested{false};
 
     // ===== 정책 =====
     std::atomic<bool>     policy_active{false}; // 정책이 팔 0~8을 소유하는 구간인지

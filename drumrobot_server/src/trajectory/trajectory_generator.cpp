@@ -1,3 +1,4 @@
+#include <thread>
 #include "trajectory/trajectory_generator.hpp"
 
 TrajectoryGenerator::TrajectoryGenerator(AppContext& ctxRef, ControlQueue &controlQueueRef, Robot& robotRef)
@@ -28,6 +29,22 @@ void TrajectoryGenerator::initialize(const std::map<std::string, std::vector<dou
 }
 
 void TrajectoryGenerator::generate_trajectory(const MotionPrimitive& motion) {
+    // 토크 인가 직전에 궤적 출발점을 실측으로 맞춘다.
+    //
+    // last_q 의 초기값은 init 자세다. init 과 home 이 같은 값이므로 START 궤적은
+    // sample(90 -> 90) = 상수가 되어, 목표가 3초 내내 home 에 고정된다.
+    // 모터가 그 자리에 없으면 오차가 첫 틱부터 끝까지 유지되고, MIT 는 오차가 곧
+    // 토크이므로 즉시 큰 토크가 걸린다 (실측: 28도 어긋난 상태에서 49 N·m 요구).
+    //
+    // 실측에서 출발시키면 sample() 이 실제로 구간을 나눈다 — 틱당 목표 이동이
+    // 0.07도 수준이라 오차가 커질 틈이 없고, PD 는 추종에 필요한 토크만 낸다.
+    if (ctx.sync_last_q_requested.exchange(false)) {
+        // 실측을 못 읽으면 토크를 켜지 않는다 — 출발점이 틀린 궤적에 게인을 걸면
+        // 첫 틱부터 큰 오차가 토크로 나간다.
+        if (sync_last_q_from_robot()) torque_on = true;
+        else std::cerr << "[TrajectoryGenerator] 토크 미인가 상태로 진행\n";
+    }
+
     switch (motion.type) {
     case MotionType::STANDBY:
         generate_standby_trajectory();  // 키 제거하기 전 현재 위치 유지 (고정)
@@ -305,6 +322,7 @@ void TrajectoryGenerator::push_setpoint(ControlSetPoint& sp) {
     // 소유권을 여기서 한 번 읽어 setpoint 에 실어 보낸다. send_loop 은 이 필드만 보고
     // 판단하므로, 생성과 소비 사이에 ctx.policy_active 가 뒤집혀도 어긋나지 않는다.
     sp.policy_owns_arm = ctx.policy_active.load();
+    sp.torque_on       = torque_on;
 
     if (sp.policy_owns_arm) {
         for (int j = 0; j < JointID::NUM_ARM; ++j) {
@@ -354,7 +372,26 @@ void TrajectoryGenerator::release_policy() {
 }
 
 // 실측 팔 관절각을 last_q에 되쓴다. 9~12(발·머리)는 planner가 계속 소유하므로 건드리지 않는다.
-void TrajectoryGenerator::sync_last_q_from_robot() {
+bool TrajectoryGenerator::sync_last_q_from_robot() {
+    // 피드백이 한 번이라도 들어온 뒤에 읽어야 한다. MIT 는 명령에 대한 응답으로만
+    // 피드백을 주므로, send_loop 의 예열(게인 0)이 돌 시간을 준다.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    for (;;) {
+        bool ready = true;
+        for (int j = 0; j < JointID::NUM_ARM && ready; ++j) {
+            auto it = robot.motors.find(j);
+            if (it == robot.motors.end()) continue;
+            auto tm = std::dynamic_pointer_cast<TMotor>(it->second);
+            if (tm && !tm->first_recv_done) ready = false;
+        }
+        if (ready) break;
+        if (std::chrono::steady_clock::now() > deadline) {
+            std::cerr << "[TrajectoryGenerator] 실측 동기화 실패 — 피드백 없음\n";
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
     for (int j = 0; j < JointID::NUM_ARM; ++j) {
         auto it = robot.motors.find(j);
         if (it == robot.motors.end()) continue;
@@ -362,6 +399,7 @@ void TrajectoryGenerator::sync_last_q_from_robot() {
         last_qd[j] = 0.0;
     }
     std::cerr << "[TrajectoryGenerator] last_q를 실측으로 동기화 (팔 0~8)\n";
+    return true;
 }
 
 std::array<ControlMode, ROBOT::NUM_JOINT> TrajectoryGenerator::get_modes(bool is_play) {

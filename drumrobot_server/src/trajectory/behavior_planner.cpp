@@ -130,12 +130,11 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_start() {
 
     // MIT 토크 인가 절차.
     //   1) send_thread에 제어 모드 진입을 요청한다 (CAN 쓰기는 send_thread 소유)
-    //   2) gain_ramp를 0에서 1로 올린다. 램프 중에는 tmotor_send_task가 p_des를
-    //      실측으로 고정하므로 위치 오차가 0이고, 따라서 토크도 0에서 출발한다.
+    //   2) 궤적 출발점을 실측으로 맞춘다. 게인은 처음부터 최대로 두고, 오차를 0 에서
+    //      시작시켜 3초 궤적으로 home 까지 서서히 간다 (서보 모드와 같은 방식).
     if (ctx.tmotor_mit.load()) {
-        ctx.gain_ramp = 0.0;
         ctx.mit_enter_requested = true;
-        ctx.gain_ramp_target = 1.0;
+        ctx.sync_last_q_requested = true;
     }
 
     sequence.push_back(make_translate(it->second, DEFAULT_MOVE_TIME));

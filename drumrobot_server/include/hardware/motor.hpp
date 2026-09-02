@@ -86,6 +86,7 @@ public:
 
     // 과전류 체크 카운터
     int cnt = 0;
+    int guard_cnt = 0;      // 송신 전 가드 연속 트립 횟수. 로그를 1초에 한 번으로 줄이는 데 쓴다
 
     // 수신이 한 번이라도 되었는지 확인
     bool first_recv_done = false;

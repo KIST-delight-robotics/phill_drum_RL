@@ -35,7 +35,11 @@ public:
     // 정책 구간이 끝날 때 실측 팔 관절각을 last_q에 되쓴다.
     // PLAYING 동안 팔은 정책이 움직이는데 TrajectoryGenerator는 그걸 모르므로,
     // 그냥 두면 복귀 궤적이 START 때 멈춘 낡은 값에서 출발해 수십 도 점프한다.
-    void sync_last_q_from_robot();
+    bool sync_last_q_from_robot();     // 실측을 읽었으면 true
+
+    // TMotor 토크 인가 여부. START 에서 궤적 출발점을 실측으로 맞출 때 true 가 되고,
+    // 그때부터 push_setpoint 가 각 setpoint 에 실어 보낸다.
+    bool torque_on = false;
  
 private:
     AppContext &ctx;

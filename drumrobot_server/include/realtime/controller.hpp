@@ -56,11 +56,6 @@ private:
     static constexpr uint64_t POLICY_TICK_STRIDE = ROBOT::POLICY_TICK_STRIDE;
     // 정책이 3주기 연속 못 내면 실패로 본다. 주기를 바꿔도 "3주기"가 유지된다.
     static constexpr uint64_t WATCHDOG_TICKS     = 3 * POLICY_TICK_STRIDE;
-    // gain_ramp를 target을 향해 코사인으로 이동. 5ms마다 1스텝.
-    void advance_gain_ramp();
-
-    static constexpr double GAIN_RAMP_SECONDS = 0.5;   // 0 -> 1 에 걸리는 시간
-
     void tmotor_send_task(const ControlSetPoint &point);
     void maxon_motor_send_task(const ControlSetPoint &point);
     void dynamixel_send_task(const ControlSetPoint &point);
