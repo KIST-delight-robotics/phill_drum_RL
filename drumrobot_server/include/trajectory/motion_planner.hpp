@@ -15,11 +15,15 @@
 #include "trajectory/behavior_planner.hpp"
 #include "trajectory/trajectory_generator.hpp"
 #include "util/audio_player.hpp"
+#include "policy/policy_config.hpp"
+#include "policy/policy_score.hpp"
 #include "util/logger.hpp"
 
 class MotionPlanner {
 public:
-    MotionPlanner(AppContext &ctxRef, CommandQueue &commandQueueRef, ControlQueue &controlQueueRef, MotionQueue &motionQueueRef, Robot &robotRef, AudioPlayer &audioRef);
+    MotionPlanner(AppContext &ctxRef, CommandQueue &commandQueueRef, ControlQueue &controlQueueRef,
+                  MotionQueue &motionQueueRef, Robot &robotRef, AudioPlayer &audioRef,
+                  const PolicyConfig &policyCfgRef, PolicyScoreStore &policyScoreRef);
     ~MotionPlanner();
 
     void run();

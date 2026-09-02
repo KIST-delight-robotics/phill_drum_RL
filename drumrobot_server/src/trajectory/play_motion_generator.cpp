@@ -122,24 +122,39 @@ std::queue<std::array<double, ROBOT::NUM_JOINT>> PlayMotionGenerator::generate_m
     //               << "  vel_L: " << rds[i].velocity_L << "\n";
     // }
 
+    const bool policy_owns_arm = ctx.policy_active.load();
+
     std::queue<std::array<double, ROBOT::NUM_JOINT>> q_queue;
-    auto [n, dt] = get_num_point(rds[0].t, rds[1].t);
+    auto [n, dt] = get_num_point(rds[0].t, rds[1].t);   // 시간의 소유자 — 유지
 
-    std::queue<BaseMotionPoint> base_motion = base_motion_generator.generate_motion(rds, n, dt);
-    std::queue<HeadMotionPoint> head_motion = head_motion_generator.generate_motion(rds, n);
+    // 발(9,10) · 머리(11,12) — 정책이 소유하지 않으므로 항상 생성한다.
+    std::queue<HeadMotionPoint>  head_motion  = head_motion_generator.generate_motion(rds, n);
     std::queue<PedalMotionPoint> pedal_motion = pedal_motion_generator.generate_motion(rds, n, dt);
-    std::queue<StateMotionPoint> state_motion = state_motion_generator.generate_motion(rds, n, dt);
 
-    if (base_motion_generator.get_error() || state_motion_generator.get_error()) {
-        std::queue<std::array<double, ROBOT::NUM_JOINT>> empty_queue;
-        return empty_queue;
+    // 팔·허리(0~8) — 정책이 소유하면 아예 생성하지 않는다.
+    //
+    // 값을 만들어 놓고 버리는 것으로는 부족하다. 두 생성기는 호출마다 내부 상태를
+    // 갱신하고(state의 4상태 머신, base의 error 플래그), get_error()가 서면
+    // 정책과 무관한 IK 실패가 구간 폐기 -> play_abort 로 이어질 수 있다.
+    // 명세 00절이 "PLAYING 호출과 solve_ik를 제거한다"고 한 것이 이 뜻이다.
+    std::queue<BaseMotionPoint>  base_motion;
+    std::queue<StateMotionPoint> state_motion;
+
+    if (!policy_owns_arm) {
+        base_motion  = base_motion_generator.generate_motion(rds, n, dt);
+        state_motion = state_motion_generator.generate_motion(rds, n, dt);
+
+        if (base_motion_generator.get_error() || state_motion_generator.get_error()) {
+            std::queue<std::array<double, ROBOT::NUM_JOINT>> empty_queue;
+            return empty_queue;
+        }
     }
 
     for (int i = 0; i < n; i++) {
-        std::array<double, ROBOT::NUM_JOINT> q;
-
-        BaseMotionPoint b = base_motion.front();
-        base_motion.pop();
+        // ★ zero-init 필수. 원본은 13개를 전부 채웠지만 팔 계산을 건너뛰면
+        //   q[0..8]이 쓰레기 값으로 남는다. 0 역시 팔에겐 위험한 자세이므로
+        //   값이 아니라 ControlMode::NONE 가드로 막는 것이 요점이다 (함정 6).
+        std::array<double, ROBOT::NUM_JOINT> q{};
 
         HeadMotionPoint h = head_motion.front();
         head_motion.pop();
@@ -147,36 +162,46 @@ std::queue<std::array<double, ROBOT::NUM_JOINT>> PlayMotionGenerator::generate_m
         PedalMotionPoint p = pedal_motion.front();
         pedal_motion.pop();
 
-        StateMotionPoint s = state_motion.front();
-        state_motion.pop();
+        if (!policy_owns_arm) {
+            BaseMotionPoint b = base_motion.front();
+            base_motion.pop();
 
-        std::array<double, 3> pR = b.right_position;
-        std::array<double, 3> pL = b.left_position;
-        double theta0 = b.waist;
-        double theta7 = b.right_wrist;
-        double theta8 = b.left_wrist;
-        KinematicsSolver::IKResult result = solver.solve_ik(pR, pL, theta0, theta7, theta8, true);
+            StateMotionPoint s = state_motion.front();
+            state_motion.pop();
 
-        if (!result.success) {
-            std::cerr << "[PlayMotionGenerator] PLAY: Failed to solve inverse kinematics\n";
-            std::queue<std::array<double, ROBOT::NUM_JOINT>> empty_queue;
-            return empty_queue;
+            std::array<double, 3> pR = b.right_position;
+            std::array<double, 3> pL = b.left_position;
+            double theta0 = b.waist;
+            double theta7 = b.right_wrist;
+            double theta8 = b.left_wrist;
+            KinematicsSolver::IKResult result = solver.solve_ik(pR, pL, theta0, theta7, theta8, true);
+
+            if (!result.success) {
+                std::cerr << "[PlayMotionGenerator] PLAY: Failed to solve inverse kinematics\n";
+                std::queue<std::array<double, ROBOT::NUM_JOINT>> empty_queue;
+                return empty_queue;
+            }
+
+            for (int j = 0; j < 9; j++) {
+                q[j] = result.q[j];   // 관절 0~8 (팔)
+            }
+
+            q[4] += s.right_elbow;
+            q[6] += s.left_elbow;
+
+            q[7] += s.right_wrist;
+            q[8] += s.left_wrist;
         }
-
-        for (int i = 0; i < 9; i++) {
-            q[i] = result.q[i];   // 관절 0~8 (팔)
-        }
-
-        q[4] += s.right_elbow;
-        q[6] += s.left_elbow;
-
-        q[7] += s.right_wrist;
-        q[8] += s.left_wrist;
+        // 정책 구간에서는 팔 0~8에 아무것도 쓰지 않는다.
+        // send_loop이 PolicyTarget 슬롯의 값으로 덮어쓴다.
 
         q[9] = p.right;
         q[10] = p.left;
 
-        q[11] = h.yaw - q[0];
+        // ★ raw yaw. 허리 보정(q[11] -= q[0])은 send_loop 머지 지점에서 한다 (함정 2).
+        //   정책 구간에는 여기서 쓸 q[0]이 없기 때문이다.
+        //   비정책 경로에서는 팔이 이미 채워져 있으므로 여기서 바로 보정한다.
+        q[11] = policy_owns_arm ? h.yaw : (h.yaw - q[0]);
         q[12] = h.pitch;
 
         q_queue.push(q);

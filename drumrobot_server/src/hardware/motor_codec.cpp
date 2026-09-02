@@ -17,9 +17,13 @@ std::tuple<int, float, float, float, int8_t, int8_t> TMotorServoCodec::decodeFee
     int16_t spd_int = (frame)->data[2] << 8 | (frame)->data[3];
     int16_t cur_int = (frame)->data[4] << 8 | (frame)->data[5];
 
-    float pos = (float)(pos_int * 0.1f * M_PI / 180.0f); // Motor Position in radians
-    float spd = (float)(spd_int * 10.0f); // Motor Speed in radians per second
-    float cur = (float)(cur_int * 0.01f); // Motor Current
+    float pos = (float)(pos_int * 0.1f * M_PI / 180.0f); // Motor Position [rad]
+    // 주의: ERPM 이다. rad/s 가 아니다 (LSB = 10 ERPM).
+    // 송신 쪽 encodeVelocity 가 rad/s x pole x gear x 60/2pi 로 넣는 것과 대칭이다.
+    // 1 rad/s = pole x gear x 60/2pi ERPM (AK70-10 이면 약 2005). 착각하면 2000배 틀린다.
+    // Controller 가 수신 직후 rad/s 로 환산해 Motor::current_velocity 에 담는다.
+    float spd = (float)(spd_int * 10.0f); // Motor Speed [ERPM]
+    float cur = (float)(cur_int * 0.01f); // Motor Current [A]
     int8_t temp = frame->data[6];         // Motor Temperature
     int8_t error = frame->data[7];        // Motor Error Code
 
@@ -97,25 +101,26 @@ void TMotorServoCodec::encodePosition(uint32_t node_id, struct can_frame *frame,
 }
 
 // ===== TMotor MIT mode Codec =====
-void TMotorMITCodec::encodeCommand(struct can_frame *frame, int canId, int dlc, float p_des, float v_des, float kp, float kd, float t_ff) {
-    // 기존 변수를 계산
-    p_des = fminf(fmaxf(GLOBAL_P_MIN, p_des), GLOBAL_P_MAX);
-    v_des = fminf(fmaxf(GLOBAL_V_MIN, v_des), GLOBAL_V_MAX);
-    kp = fminf(fmaxf(GLOBAL_KP_MIN, kp), GLOBAL_KP_MAX);
-    kd = fminf(fmaxf(GLOBAL_KD_MIN, kd), GLOBAL_KD_MAX);
-    t_ff = fminf(fmaxf(GLOBAL_T_MIN, t_ff), GLOBAL_T_MAX);
+void TMotorMITCodec::encodeCommand(struct can_frame *frame, int canId, int dlc,
+                                   float p_des, float v_des, float kp, float kd, float t_ff,
+                                   const MotorMitLimits &lim) {
+    // 인코딩 범위로 clamp
+    p_des = fminf(fmaxf(lim.p_min,  p_des), lim.p_max);
+    v_des = fminf(fmaxf(lim.v_min,  v_des), lim.v_max);
+    kp    = fminf(fmaxf(lim.kp_min, kp),    lim.kp_max);
+    kd    = fminf(fmaxf(lim.kd_min, kd),    lim.kd_max);
+    t_ff  = fminf(fmaxf(lim.t_min,  t_ff),  lim.t_max);
 
-    // 계산된 변수를 이용하여 unsigned int로 변환
-    int p_int = floatToUint(p_des, GLOBAL_P_MIN, GLOBAL_P_MAX, 16);
-    int v_int = floatToUint(v_des, GLOBAL_V_MIN, GLOBAL_V_MAX, 12);
-    int kp_int = floatToUint(kp, GLOBAL_KP_MIN, GLOBAL_KP_MAX, 12);
-    int kd_int = floatToUint(kd, GLOBAL_KD_MIN, GLOBAL_KD_MAX, 12);
-    int t_int = floatToUint(t_ff, GLOBAL_T_MIN, GLOBAL_T_MAX, 12);
-    // Set CAN frame id and data length code
+    int p_int  = floatToUint(p_des, lim.p_min,  lim.p_max,  16);
+    int v_int  = floatToUint(v_des, lim.v_min,  lim.v_max,  12);
+    int kp_int = floatToUint(kp,    lim.kp_min, lim.kp_max, 12);
+    int kd_int = floatToUint(kd,    lim.kd_min, lim.kd_max, 12);
+    int t_int  = floatToUint(t_ff,  lim.t_min,  lim.t_max,  12);
+
+    // MIT는 표준 프레임(11비트). 서보 모드의 확장 프레임과 다르다.
     frame->can_id = canId & CAN_SFF_MASK;
     frame->can_dlc = dlc;
 
-    /// pack ints into the can buffer ///
     frame->data[0] = p_int >> 8;                           // Position 8 higher
     frame->data[1] = p_int & 0xFF;                         // Position 8 lower
     frame->data[2] = v_int >> 4;                           // Speed 8 higher
@@ -126,20 +131,22 @@ void TMotorMITCodec::encodeCommand(struct can_frame *frame, int canId, int dlc, 
     frame->data[7] = t_int & 0xff;                         // torque 4 bit lower
 }
 
-std::tuple<int, float, float, float> TMotorMITCodec::decodeFeedback(struct can_frame *frame) {
+std::tuple<int, float, float, float> TMotorMITCodec::decodeFeedback(struct can_frame *frame,
+                                                                    const MotorMitLimits &lim) {
     int id;
     float position, speed, torque;
 
     /// unpack ints from can buffer ///
+    // 주의: 서보 모드는 can_id 하위 바이트가 모터 id지만, MIT는 data[0]에 들어온다.
     id = frame->data[0];
     int p_int = (frame->data[1] << 8) | frame->data[2];
     int v_int = (frame->data[3] << 4) | (frame->data[4] >> 4);
-    int i_int = ((frame->data[4] & 0xF) << 8) | frame->data[5];
+    int t_int = ((frame->data[4] & 0xF) << 8) | frame->data[5];
 
     /// convert ints to floats ///
-    position = uintToFloat(p_int, GLOBAL_P_MIN, GLOBAL_P_MAX, 16);
-    speed = uintToFloat(v_int, GLOBAL_V_MIN, GLOBAL_V_MAX, 12);
-    torque = uintToFloat(i_int, -GLOBAL_I_MAX, GLOBAL_I_MAX, 12);
+    position = uintToFloat(p_int, lim.p_min, lim.p_max, 16);
+    speed    = uintToFloat(v_int, lim.v_min, lim.v_max, 12);
+    torque   = uintToFloat(t_int, lim.t_min, lim.t_max, 12);
 
     return std::make_tuple(id, position, speed, torque);
 }

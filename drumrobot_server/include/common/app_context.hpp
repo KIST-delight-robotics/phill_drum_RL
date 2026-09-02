@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <vector>
 #include <string>
 
@@ -26,6 +27,29 @@ struct AppContext {
     std::atomic<bool> recv_active{false};           // recv_loop 활성화 신호
 
     std::atomic<RobotState> robot_state{RobotState::STANDBY};  // 로봇 상태
+
+    // ===== MIT 모드 =====
+    std::atomic<bool>   tmotor_mit{true};       // 팔 TMotor를 MIT로 구동할지 (motors.json 최상위에서 로드)
+    std::atomic<double> gain_ramp{0.0};         // MIT 게인 배율 0->1. 토크 인가 시 코사인으로 올린다
+    std::atomic<double> gain_ramp_target{0.0};  // 목표값. send_loop이 이 값을 향해 gain_ramp를 움직인다
+    std::atomic<bool>   mit_enter_requested{false};  // send_loop에게 MIT 제어 모드 진입 프레임 송신을 요청
+
+    // ===== 정책 =====
+    std::atomic<bool>     policy_active{false}; // 정책이 팔 0~8을 소유하는 구간인지
+    std::atomic<bool>     policy_fault{false};  // 워치독 실패 / 추론 타임아웃
+
+    // PolicyRunner 가 세션·ObsBuilder 초기화를 마치면 true. 이게 false 면
+    // policy_active 를 절대 세우지 않는다 — 세우면 팔이 주인 없이 남는다.
+    std::atomic<bool>     policy_ready{false};
+
+    // 곡 시작마다 +1. PolicyRunner 가 값이 바뀐 것을 보고 ObsBuilder 를 reset 한다.
+    // 재장전 상태머신·스케줄러 히스테리시스가 이전 곡의 상태를 물고 가면 안 된다.
+    std::atomic<uint64_t> policy_epoch{0};
+    std::atomic<uint64_t> tick{0};              // send_loop이 5ms pop마다 +1. 유일한 시간 권위
+    std::atomic<double>   t_score{0.0};         // 현재 tick의 악보 시간 [s]
+
+    std::mutex              policy_mtx;
+    std::condition_variable policy_cv;          // send_loop이 POLICY_TICK_STRIDE 틱마다 notify
 
     std::mutex last_q_mutex;                        // 마지막 목표 관절각 스냅샷 (BehaviorPlanner가 갱신, TcpServer가 조회)
     std::vector<double> last_q_target_snapshot;     // NOTE: 실측값이 아니라 "마지막으로 명령된 목표 자세"임

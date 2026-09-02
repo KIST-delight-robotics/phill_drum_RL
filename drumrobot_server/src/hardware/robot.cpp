@@ -20,6 +20,7 @@ void Robot::initialize() {
     maxon_motor_setting();
     can.setSocketNonBlock();
     set_zero_tmotor();
+    enter_mit_mode();
     maxon_motor_enable();
     set_maxon_motor_mode("CSP");
     init_dynamixel();
@@ -38,6 +39,9 @@ void Robot::init_motor_from_json() {
 
     json config = json::parse(f);
 
+    use_mit = config.value("tmotor_mit", true);
+    std::cout << "[Robot] TMotor 제어 모드: " << (use_mit ? "MIT" : "SERVO") << "\n";
+
     for (auto &m : config["motors"]) {
         std::string type = m["type"];
         int id = m["id"];
@@ -55,6 +59,16 @@ void Robot::init_motor_from_json() {
             motor->gear_ratio = m["gear_ratio"];
             motor->current_limit = m["current_limit"];
             motor->control_gain = m["control_gain"];
+
+            motor->mit_kp      = m.value("mit_kp",      100.0);
+            motor->mit_kd      = m.value("mit_kd",        5.0);
+            motor->mit_p_limit = m.value("mit_p_limit",  12.5);
+            motor->mit_v_limit = m.value("mit_v_limit",  50.0);
+            motor->mit_t_limit = m.value("mit_t_limit",  25.0);
+            motor->mit_kp_max  = m.value("mit_kp_max",  500.0);
+            motor->mit_kd_max  = m.value("mit_kd_max",    5.0);
+            motor->mit_torque_safety = m.value("mit_torque_safety", 24.0);
+
             motors[id] = motor;
 
             // std::cout << "[Robot] motor setting: " << motor->name << "\n";
@@ -266,14 +280,48 @@ void Robot::set_zero_tmotor() {
         auto tmotor = std::dynamic_pointer_cast<TMotor>(motor);
         if (!tmotor) continue;
 
-        t_codec.encodeSetOrigin(tmotor->node_id, &frame, 0);
-        can.sendFrame(tmotor->socket, frame);
+        if (use_mit) {
+            // MIT 영점은 제어 모드 안에서만 받는다. enter -> setzero -> exit 순서.
+            // enter 자체는 토크를 걸지 않는다 (첫 command 프레임을 받아야 통전).
+            mit_codec.encodeEnterControlMode(tmotor->node_id, &frame);
+            can.sendFrame(tmotor->socket, frame);
+            usleep(50000);
+
+            mit_codec.encodeSetZero(tmotor->node_id, &frame);
+            can.sendFrame(tmotor->socket, frame);
+            usleep(50000);
+
+            mit_codec.encodeExitControlMode(tmotor->node_id, &frame);
+            can.sendFrame(tmotor->socket, frame);
+        } else {
+            t_codec.encodeSetOrigin(tmotor->node_id, &frame, 0);
+            can.sendFrame(tmotor->socket, frame);
+        }
 
         usleep(100000);    // 100ms
     }
 
     std::cout << "[Robot] TMotor Set Zero\n";
     sleep(2);   // Set Zero 명령이 확실히 실행된 후 종료
+}
+
+// TMotor를 MIT 제어 모드에 넣어 둔다.
+// MIT는 command 프레임에 대한 응답으로만 피드백을 주므로, 제어 모드 밖에 있으면
+// send_loop의 all_tmotors_received() 게이트를 영원히 통과하지 못한다.
+// 제어 모드 진입 자체는 통전시키지 않는다 — kp/kd가 실린 command를 받아야 토크가 생긴다.
+void Robot::enter_mit_mode() {
+    if (!use_mit) return;
+
+    struct can_frame frame;
+    for (auto &[id, motor] : motors) {
+        auto tmotor = std::dynamic_pointer_cast<TMotor>(motor);
+        if (!tmotor) continue;
+
+        mit_codec.encodeEnterControlMode(tmotor->node_id, &frame);
+        can.sendFrame(tmotor->socket, frame);
+        usleep(20000);
+    }
+    std::cout << "[Robot] TMotor MIT 제어 모드 진입 (게인 0, 토크 미인가)\n";
 }
 
 void Robot::maxon_motor_enable() {

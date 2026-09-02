@@ -15,11 +15,14 @@
 #include "common/command_queue.hpp"         // ParsedCommand, Opcode
 #include "common/motion_queue.hpp"          // MotionPrimitive
 #include "hardware/robot.hpp"
+#include "policy/policy_config.hpp"
+#include "policy/policy_score.hpp"
 #include "util/audio_player.hpp"
 
 class BehaviorPlanner {
 public:
-    BehaviorPlanner(AppContext &ctxRef, Robot &robotRef, AudioPlayer &audioRef);
+    BehaviorPlanner(AppContext &ctxRef, Robot &robotRef, AudioPlayer &audioRef,
+                    const PolicyConfig &policyCfgRef, PolicyScoreStore &policyScoreRef);
     ~BehaviorPlanner();
 
     std::vector<MotionPrimitive> generate_motion_sequence(const ParsedCommand& parsed);
@@ -72,10 +75,15 @@ private:
     // ===== audio =====
     AudioPlayer &audio_player;
 
+    // ===== policy =====
+    const PolicyConfig &policy_cfg;      // 기동 시 1회 로드된 것 (읽기 전용)
+    PolicyScoreStore   &policy_score;    // 곡 시작 시 여기에 발행
+
     // play_list.json 로부터 로드한 id -> (악보명, 음악명) 매핑
     struct PlayEntry {
         std::string score;
         std::string audio;
+        std::string midi;       // 비어 있지 않으면 data/midi/<midi> 를 악보 원본으로 쓴다
         int init_note_r, init_note_l;
     };
     std::map<std::string, PlayEntry> play_list;

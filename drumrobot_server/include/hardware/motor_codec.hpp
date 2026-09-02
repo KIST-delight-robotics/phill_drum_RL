@@ -30,20 +30,29 @@ public:
 private:
 };
 
+// TMotor MIT 모드 인코딩 한계값.
+//   p/v/t  : MIT 프로토콜이 12/16비트로 인코딩할 때 쓰는 범위. 모터 펌웨어 상수이며
+//            물리 한계가 아니다. 모델(AK10-9 / AK70-10)마다 다르므로 모터가 들고 다닌다.
+//   kp/kd  : 게인 인코딩 범위. CubeMars 매뉴얼 상한 Kd <= 5.
+struct MotorMitLimits {
+    float p_min  = -12.5f, p_max  = 12.5f;   // [rad] 출력축
+    float v_min  = -50.0f, v_max  = 50.0f;   // [rad/s]
+    float t_min  = -25.0f, t_max  = 25.0f;   // [N·m]
+    float kp_min =   0.0f, kp_max = 500.0f;
+    float kd_min =   0.0f, kd_max =   5.0f;
+};
+
 class TMotorMITCodec {
 public:
-    float GLOBAL_P_MIN = -12.5;
-    float GLOBAL_P_MAX = 12.5;
-    float GLOBAL_KP_MIN = 0;
-    float GLOBAL_KP_MAX = 500;
-    float GLOBAL_KD_MIN = 0;
-    float GLOBAL_KD_MAX = 5;
-    float GLOBAL_V_MIN, GLOBAL_V_MAX, GLOBAL_T_MIN, GLOBAL_T_MAX;
-    float GLOBAL_I_MAX, Kt;
+    // 한계값은 모터별로 주입한다 (클래스 전역이면 AK10-9와 AK70-10을 구분할 수 없다).
+    void encodeCommand(struct can_frame *frame, int canId, int dlc,
+                       float p_des, float v_des, float kp, float kd, float t_ff,
+                       const MotorMitLimits &lim);
 
-
-    void encodeCommand(struct can_frame *frame, int canId, int dlc, float p_des, float v_des, float kp, float kd, float t_ff);
-    std::tuple<int, float, float, float> decodeFeedback(struct can_frame *frame);
+    // 반환: (id, position[rad], velocity[rad/s], torque[N·m])
+    // 주의: MIT 피드백은 can_id가 아니라 data[0]에 모터 id가 들어온다.
+    std::tuple<int, float, float, float> decodeFeedback(struct can_frame *frame,
+                                                        const MotorMitLimits &lim);
 
     // node_id: motor.node_id
     void encodeCheck(uint32_t node_id, struct can_frame *frame);

@@ -30,6 +30,19 @@ TMotor::TMotor(int id)
 
 }
 
+MotorMitLimits TMotor::mit_limits() const {
+    MotorMitLimits lim;
+    lim.p_min = -static_cast<float>(mit_p_limit);
+    lim.p_max =  static_cast<float>(mit_p_limit);
+    lim.v_min = -static_cast<float>(mit_v_limit);
+    lim.v_max =  static_cast<float>(mit_v_limit);
+    lim.t_min = -static_cast<float>(mit_t_limit);
+    lim.t_max =  static_cast<float>(mit_t_limit);
+    lim.kp_max = static_cast<float>(mit_kp_max);
+    lim.kd_max = static_cast<float>(mit_kd_max);
+    return lim;
+}
+
 MaxonMotor::MaxonMotor(int id)
     : Motor(id) {
         

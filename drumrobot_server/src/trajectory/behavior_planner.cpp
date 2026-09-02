@@ -1,24 +1,9 @@
 #include "trajectory/behavior_planner.hpp"
 
-// 관절 ID 상수 (motors.json 참조)
-namespace JointID {
-    constexpr int WAIST            = 0;
-    constexpr int R_SHOULDER_1     = 1;
-    constexpr int L_SHOULDER_1     = 2;
-    constexpr int R_SHOULDER_2     = 3;
-    constexpr int R_ELBOW          = 4;
-    constexpr int L_SHOULDER_2     = 5;
-    constexpr int L_ELBOW          = 6;
-    constexpr int R_WRIST          = 7;
-    constexpr int L_WRIST          = 8;
-    constexpr int R_PEDAL          = 9;
-    constexpr int L_PEDAL          = 10;
-    constexpr int HEAD_YAW         = 11;
-    constexpr int HEAD_PITCH       = 12;
-}
-
-BehaviorPlanner::BehaviorPlanner(AppContext &ctxRef, Robot &robotRef, AudioPlayer &audioRef)
-    : ctx(ctxRef), robot(robotRef), audio_player(audioRef) {
+BehaviorPlanner::BehaviorPlanner(AppContext &ctxRef, Robot &robotRef, AudioPlayer &audioRef,
+                                 const PolicyConfig &policyCfgRef, PolicyScoreStore &policyScoreRef)
+    : ctx(ctxRef), robot(robotRef), audio_player(audioRef),
+      policy_cfg(policyCfgRef), policy_score(policyScoreRef) {
     // 초기 자세를 last_q_target으로 설정 (모터의 initial_joint_angle 사용)
     last_q_target.resize(ROBOT::NUM_JOINT, 0.0);
     for (const auto &[id, motor] : robot.motors) {
@@ -121,6 +106,7 @@ void BehaviorPlanner::init_play_list_from_json() {
         PlayEntry e;
         e.score = entry.value("score", "");
         e.audio = entry.value("audio", "");
+        e.midi  = entry.value("midi",  "");   // 있으면 data/midi/<midi> 를 악보 원본으로
         e.init_note_r = entry.value("init_note_r", 1);
         e.init_note_l = entry.value("init_note_l", 1);
 
@@ -140,6 +126,16 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_start() {
     if (it == poses.end()) {
         std::cerr << "[BehaviorPlanner] 'home' pose not found in robot_poses.json\n";
         return sequence;
+    }
+
+    // MIT 토크 인가 절차.
+    //   1) send_thread에 제어 모드 진입을 요청한다 (CAN 쓰기는 send_thread 소유)
+    //   2) gain_ramp를 0에서 1로 올린다. 램프 중에는 tmotor_send_task가 p_des를
+    //      실측으로 고정하므로 위치 오차가 0이고, 따라서 토크도 0에서 출발한다.
+    if (ctx.tmotor_mit.load()) {
+        ctx.gain_ramp = 0.0;
+        ctx.mit_enter_requested = true;
+        ctx.gain_ramp_target = 1.0;
     }
 
     sequence.push_back(make_translate(it->second, DEFAULT_MOVE_TIME));
@@ -526,6 +522,26 @@ std::vector<MotionPrimitive> BehaviorPlanner::make_play_sequence(const std::stri
         }
     }
     inputFile.close();
+
+    // ===== 정책용 악보 발행 (곡당 1회) =====
+    // .txt(rds) 와 .mid 두 경로를 모두 받는다. 세기 스케일이 달라 로더가 각자 변환한다:
+    //   .txt : u = (v-1)/6   (실기 1~7 등급)
+    //   .mid : u = midi/127  (학습 원본. 변환 없음)
+    // MIDI 는 DrumEvent 로 내리지 않고 원본 velocity 를 그대로 쓴다 — 등급 왕복에서
+    // 정보가 깎이기 때문이다. (DrumEvent 는 페달·머리 생성기용으로만 필요하다.)
+    if (policy_cfg.valid) {
+        if (!it->second.midi.empty()) {
+            MidiScore midi;
+            if (midi.load("drumrobot_server/data/midi/" + it->second.midi)) {
+                policy_score.publish(midi, policy_cfg, it->second.midi);
+            } else {
+                std::cerr << "[BehaviorPlanner] MIDI 로드 실패 — 정책 악보 없이 진행합니다\n";
+                policy_score.clear();
+            }
+        } else {
+            policy_score.publish(rds, policy_cfg, score_name);
+        }
+    }
 
     if (start_bar > 0 && rds.size() < 2) {
         std::cerr << "[BehaviorPlanner] PLAY: 재개 마디(" << start_bar

@@ -1,7 +1,7 @@
 #include "trajectory/trajectory_generator.hpp"
 
-TrajectoryGenerator::TrajectoryGenerator(AppContext& ctxRef, ControlQueue &controlQueueRef)
-    : ctx(ctxRef), control_queue(controlQueueRef),
+TrajectoryGenerator::TrajectoryGenerator(AppContext& ctxRef, ControlQueue &controlQueueRef, Robot& robotRef)
+    : ctx(ctxRef), control_queue(controlQueueRef), robot(robotRef),
       play_motion_generator(ctxRef), trajectory_log("trajectory") {
     
     std::vector<std::string> header = {
@@ -17,6 +17,9 @@ TrajectoryGenerator::~TrajectoryGenerator() {
 }
 
 void TrajectoryGenerator::initialize(const std::map<std::string, std::vector<double>>& pose) {
+    // 팔 TMotor 제어 모드. motors.json 최상위 "tmotor_mit"으로 결정된다.
+    tmotor_control_mode = ctx.tmotor_mit.load() ? ControlMode::MIT : ControlMode::VEL;
+
     solver.initialize();
     play_motion_generator.initialize();
 
@@ -71,7 +74,7 @@ void TrajectoryGenerator::generate_standby_trajectory() {
         std::copy(q.begin(),  q.end(),  set_point.q.begin());
         std::copy(qd.begin(), qd.end(), set_point.qd.begin());
         set_point.mode = modes;
-        control_queue.push(set_point);
+        push_setpoint(set_point);
 
         trajectory_log.record(set_point.q);
     }
@@ -91,7 +94,7 @@ void TrajectoryGenerator::generate_joint_space_trajectory(const MotionPrimitive&
         std::copy(q.begin(),  q.end(),  set_point.q.begin());
         std::copy(qd.begin(), qd.end(), set_point.qd.begin());
         set_point.mode = modes;
-        control_queue.push(set_point);
+        push_setpoint(set_point);
 
         trajectory_log.record(set_point.q);
     }
@@ -158,7 +161,7 @@ void TrajectoryGenerator::generate_task_space_trajectory(const MotionPrimitive& 
     while (!buffer.empty()) {
         ControlSetPoint sp = buffer.front();
         buffer.pop();
-        control_queue.push(sp);
+        push_setpoint(sp);
 
         trajectory_log.record(sp.q);
     }
@@ -183,7 +186,7 @@ void TrajectoryGenerator::generate_play_start_trajectory(const MotionPrimitive& 
             std::copy(q.begin(),  q.end(),  set_point.q.begin());
             std::copy(qd.begin(), qd.end(), set_point.qd.begin());
             set_point.mode = modes;
-            control_queue.push(set_point);
+            push_setpoint(set_point);
 
             trajectory_log.record(set_point.q);
         }
@@ -191,12 +194,21 @@ void TrajectoryGenerator::generate_play_start_trajectory(const MotionPrimitive& 
         update_last_q(q1);
 
         first_point = true; // 음악 재생을 위함
+
+        // ready 자세까지의 전이 궤적을 모두 밀어 넣은 뒤에 넘긴다.
+        // 위 setpoint 들은 policy_owns_arm=false 로 이미 큐에 들어갔으므로
+        // 팔이 그 궤적을 끝까지 따라간 다음 정책이 이어받는다.
+        acquire_policy();
     } else {
         ctx.play_abort = true;
     }
 }
 
 void TrajectoryGenerator::generate_play_end_trajectory() {
+    // 궤적을 만들기 전에 되받는다. last_q 가 실측으로 맞춰진 뒤 q0 을 떠야
+    // 복귀 궤적이 점프하지 않는다.
+    release_policy();
+
     // play 후 레디 자세로 이동
     std::array<ControlMode, ROBOT::NUM_JOINT> modes = get_modes();
     double t_total = 4.0;
@@ -212,7 +224,7 @@ void TrajectoryGenerator::generate_play_end_trajectory() {
         std::copy(q.begin(),  q.end(),  set_point.q.begin());
         std::copy(qd.begin(), qd.end(), set_point.qd.begin());
         set_point.mode = modes;
-        control_queue.push(set_point);
+        push_setpoint(set_point);
 
         trajectory_log.record(set_point.q);
     }
@@ -250,7 +262,7 @@ void TrajectoryGenerator::generate_play_trajectory(const MotionPrimitive& motion
         }
         
         set_point.mode = modes;
-        control_queue.push(set_point);
+        push_setpoint(set_point);
 
         prev_q = q;
 
@@ -275,12 +287,81 @@ void TrajectoryGenerator::generate_idle_trajectory() {
         std::copy(q.begin(),  q.end(),  set_point.q.begin());
         std::copy(qd.begin(), qd.end(), set_point.qd.begin());
         set_point.mode = modes;
-        control_queue.push(set_point);
+        push_setpoint(set_point);
 
         trajectory_log.record(set_point.q);
     }
 
     update_last_q(q1);
+}
+
+// ControlQueue로 나가는 유일한 통로.
+//
+// 정책 구간에서는 팔 0~8을 ControlMode::NONE 으로 비워 둔다. NONE이 곧 fail-safe다 —
+// tmotor_send_task / maxon_motor_send_task가 NONE을 만나면 프레임을 보내지 않고,
+// 프레임 미송신은 모터가 직전 명령을 유지한다는 뜻이다. send_loop의 머지가 어떤 이유로든
+// 실패해도(슬롯이 비었거나 낡았거나) 팔은 자동으로 홀드된다.
+void TrajectoryGenerator::push_setpoint(ControlSetPoint& sp) {
+    // 소유권을 여기서 한 번 읽어 setpoint 에 실어 보낸다. send_loop 은 이 필드만 보고
+    // 판단하므로, 생성과 소비 사이에 ctx.policy_active 가 뒤집혀도 어긋나지 않는다.
+    sp.policy_owns_arm = ctx.policy_active.load();
+
+    if (sp.policy_owns_arm) {
+        for (int j = 0; j < JointID::NUM_ARM; ++j) {
+            sp.q[j]    = 0.0;
+            sp.qd[j]   = 0.0;
+            sp.mode[j] = ControlMode::NONE;   // "이 관절은 내 소유가 아님"
+        }
+    }
+    sp.t_score = cur_t_score;
+    control_queue.push(sp);
+}
+
+// 정책에 팔 0~8을 넘긴다.
+//
+// 거절 조건이 있다. 하나라도 걸리면 정책 없이 기존 개루프 경로로 연주한다 —
+// 넘긴 뒤에 문제가 드러나면 팔이 주인 없이 남아 위험하므로, 넘기기 전에 본다.
+bool TrajectoryGenerator::acquire_policy() {
+    if (!ctx.policy_ready.load()) {
+        std::cerr << "[TrajectoryGenerator] 정책 미준비 — 개루프로 연주합니다\n";
+        return false;
+    }
+    if (!ctx.tmotor_mit.load()) {
+        // 정책 출력은 위치 목표이고 MIT 의 Kp/Kd 로 추종한다. 서보 모드에는 실을 곳이 없다.
+        std::cerr << "[TrajectoryGenerator] TMotor가 MIT 모드가 아님 — 개루프로 연주합니다\n";
+        return false;
+    }
+    for (int j = 0; j < JointID::NUM_ARM; ++j) {
+        if (robot.motors.find(j) == robot.motors.end()) {
+            std::cerr << "[TrajectoryGenerator] 팔 모터 " << j
+                      << " 결번 — 개루프로 연주합니다\n";
+            return false;
+        }
+    }
+
+    ctx.policy_fault = false;
+    ctx.policy_epoch.fetch_add(1);   // ObsBuilder reset 유도
+    ctx.policy_active = true;
+    std::cerr << "[TrajectoryGenerator] 팔 0~8 소유권을 정책에 넘겼습니다\n";
+    return true;
+}
+
+// 팔을 되받는다. 정책이 움직인 실제 자세에서 복귀 궤적이 출발하도록 last_q 를 맞춘다.
+void TrajectoryGenerator::release_policy() {
+    if (!ctx.policy_active.exchange(false)) return;
+    sync_last_q_from_robot();
+    std::cerr << "[TrajectoryGenerator] 팔 0~8 소유권을 되받았습니다\n";
+}
+
+// 실측 팔 관절각을 last_q에 되쓴다. 9~12(발·머리)는 planner가 계속 소유하므로 건드리지 않는다.
+void TrajectoryGenerator::sync_last_q_from_robot() {
+    for (int j = 0; j < JointID::NUM_ARM; ++j) {
+        auto it = robot.motors.find(j);
+        if (it == robot.motors.end()) continue;
+        last_q[j] = it->second->current_joint_angle;
+        last_qd[j] = 0.0;
+    }
+    std::cerr << "[TrajectoryGenerator] last_q를 실측으로 동기화 (팔 0~8)\n";
 }
 
 std::array<ControlMode, ROBOT::NUM_JOINT> TrajectoryGenerator::get_modes(bool is_play) {

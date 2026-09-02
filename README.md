@@ -1,4 +1,11 @@
-# Phil
+# phill_drum_RL
+
+드럼 로봇 실시간 제어 서버. **연주 구간의 팔 9관절을 강화학습 정책이 폐루프로 구동**합니다.
+머리·발·전이 궤적은 기존 개루프 경로를 그대로 씁니다.
+
+> 원본 저장소 [`Phil-drum-robot`](https://github.com/KIST-delight-robotics/Phil-drum-robot) 에서
+> RL 정책 이식 작업을 분리한 저장소입니다. 정책을 켜지 못하는 상황에서는
+> 모든 경로가 기존 개루프로 안전 강등되므로, 원본과 같은 방식으로도 동작합니다.
 
 > 개발 중인 드럼 연주 로봇 제어 시스템.
 
@@ -19,10 +26,24 @@ CAN 통신 기반으로 TMotor / Maxon / Dynamixel 모터를 제어하며, LLM(T
 - **빌드 도구**: GNU Make
 - **컴파일 옵션**: `-Wall -O2 -g -std=c++17 -fPIC` (Makefile 기본값)
 
-### 의존성 (저장소에 포함)
+### 의존성
+
+**저장소에 포함**
 
 - **Dynamixel SDK** — `drumrobot_server/lib/dynamixel_sdk/`
 - **nlohmann/json** — `drumrobot_server/lib/nlohmann/json.hpp`
+- **miniaudio** — `drumrobot_server/lib/miniaudio/miniaudio.h`
+
+**따로 받아야 하는 것 — ONNX Runtime 1.23.2**
+
+정책 추론에 씁니다. 용량이 커서 저장소에 넣지 않고 스크립트로 받습니다
+(sha256 고정, 최초 1회):
+
+```bash
+bash drumrobot_server/lib/onnxruntime/fetch.sh
+```
+
+받지 않아도 **빌드는 실패하지만**, 받은 뒤에는 정책 없이도(=개루프로도) 그대로 동작합니다.
 
 ### 하드웨어
 
@@ -70,6 +91,28 @@ CAN 통신 기반으로 TMotor / Maxon / Dynamixel 모터를 제어하며, LLM(T
    CAN Bus → 모터
 ```
 
+### 정책 폐루프 (연주 중 팔 0~8)
+
+```
+   Controller ──(조건변수, 3틱=15ms)──▶ PolicyRunner
+        ▲                                    │
+        │                              ONNX 추론 (~20 µs)
+        │                                    ▼
+        │                              PolicyTarget      (seqlock 슬롯 · 최신값)
+        │                                    │
+        └────────── merge_policy_target ◀────┘
+                    (팔 0~8 목표 덮어쓰기)
+
+   CAN Bus → recv_thread ──▶ JointSnapshot (seqlock · 9관절 시간정합) ──▶ PolicyRunner
+```
+
+정책 출력은 **큐가 아니라 슬롯**에 씁니다. `ControlQueue` 에 넣으면 planner 가 미리 채운
+약 100ms 버퍼 뒤에 줄을 서 폐루프가 성립하지 않기 때문입니다. 값을 흘려도 되고,
+**낡은 값만 막으면** 되므로 슬롯에 `tick` 을 함께 실어 워치독이 검사합니다.
+
+정책 주기는 자체 타이머가 아니라 **`send_loop` 의 틱 3개**로 정의됩니다. 그래서 두 개의
+독립된 시계가 생기지 않고, send 가 지터를 겪어도 정렬이 유지됩니다.
+
 ### 핵심 컴포넌트
 
 | 컴포넌트 | 책임 |
@@ -102,10 +145,14 @@ CAN 통신 기반으로 TMotor / Maxon / Dynamixel 모터를 제어하며, LLM(T
 |---|---|---|---|
 | `send_thread` | 40 | 1ms (Maxon 보간) / 5ms (TMotor + Maxon + Dynamixel) | CAN 프레임 송신 |
 | `recv_thread` | 30 | 100µs | CAN 프레임 수신 및 모터 상태 갱신, 안전 검사 |
+| `policy_thread` | 25 | 3틱 = 15ms (66.7Hz) | obs 조립 → ONNX 추론 → 팔 목표 발행 |
 | `motion_planning_thread` | 20 | 5ms 폴링 | CommandQueue → MotionQueue → ControlQueue 변환 |
 | `tcp_server_thread` | 10 | 블로킹 | 사용자 입력(TCP) 수신 |
 
 우선순위는 `SCHED_FIFO` 정책 기준 (값이 클수록 높음).
+`policy_thread` 는 `recv`(30)보다 낮습니다 — 정책이 폭주해도 모터 상태 갱신이 굶으면
+안 되기 때문입니다. `motion_planning`(20)보다는 높습니다 — 궤적 생성은 무겁고
+데드라인이 없습니다. 정책을 켜지 못하면 이 스레드는 **생성되지 않습니다**.
 
 ---
 
@@ -129,10 +176,21 @@ Phil/
     │   └── can_ports.json                  # 머신별 USB 허브/포트 매핑 (CAN 리셋용)
     ├── data/
     │   ├── midi/                           # MIDI 원본
-    │   └── scores/                         # 연주용 악보 (.txt)
-    │   └── audio/                          # 음악 파일 (.wav)
+    │   ├── scores/                         # 연주용 악보 (.txt)
+    │   ├── audio/                          # 음악 파일 (.wav)
+    │   └── policy/                         # ★ 학습 산출물
+    │       ├── policy.onnx                 #   정책 그래프 (정규화 포함)
+    │       ├── obs_constants.json          #   주기·게인·판정상수·관절순서
+    │       └── golden.json                 #   검증 픽스처 (미추적, dump_golden.py 로 생성)
+    ├── tools/                              # ★ 검증 도구 (main.out 에 미포함)
+    │   ├── golden_check.cpp                #   sim vs C++ 요소별 대조
+    │   ├── ort_check.cpp                   #   ORT 링크·그래프 규약·추론시간
+    │   ├── obs_check.cpp                   #   obs 조립 단위검사
+    │   └── policy_score_check.cpp          #   악보 파싱·양자화·밀도
     ├── lib/
     │   ├── dynamixel_sdk/
+    │   ├── miniaudio/miniaudio.h
+    │   ├── onnxruntime/fetch.sh            # ★ 라이브러리 본체는 미추적
     │   └── nlohmann/json.hpp
     ├── include/
     │   ├── common/                         # app_context, command/control/motion_queue, robot_config
@@ -140,6 +198,8 @@ Phil/
     │   ├── kinematics/                     # kinematics_solver
     │   ├── tcp/                            # tcp_server, command_parser
     │   ├── realtime/                       # controller
+    │   ├── policy/                         # ★ policy_runner, obs_builder, policy_score,
+    │   │                                   #   midi_score, policy_config, policy_target
     │   ├── trajectory/                     # behavior_planner, motion_planner,
     │   │                                   #   trajectory_generator, play/base/state/pedal/head_motion_generator
     │   └── util/                           # logger
@@ -208,16 +268,25 @@ Phil/
 | 모터 | 제어 모드 |
 |---|---|
 | TMotor       | `POS` (SET_POS), `VEL` (SET_RPM + P 피드백), `SET_POS_SPD`, `SET_ORIGIN`, `CURRENT_BRAKE` |
-| TMotor (MIT) | Position-Velocity-Torque 통합 코덱 구현됨. 단, Controller에서 현재 미사용 |
+| TMotor (MIT) | `MIT` — `tau = Kp(p_des − p) + Kd(v_des − qd) + t_ff`. **현재 기본 모드** |
 | MaxonMotor   | `CSP` (Cyclic Sync Position), `CST` (Cyclic Sync Torque), `HMM` (Homing). `CSV` 미구현 |
 | Dynamixel    | 위치 제어 (Profile Acceleration / Velocity + Goal Position) |
 
-### 제어 모드 기본값 (`trajectory_generator.hpp`)
+### 제어 모드 기본값
 
-- TMotor(0~6) = `VEL`
+- **TMotor(0~6) = `MIT`** — `motors.json` 최상위 `"tmotor_mit"` 로 전환.
+  `false` 면 기존 `VEL` 로 되돌아갑니다
 - Wrist(7, 8) = `CSP` (단, 연주 중에는 `CST`로 전환)
 - Pedal(9, 10) = `CSP`
 - Head(11, 12) = Dynamixel 위치 제어 (`ControlMode::NONE`)
+
+MIT 로 바꾼 이유는 학습이 모델링한 PD 법칙(`stiffness`/`damping`)을 실기에서 그대로
+재현하기 위해서입니다. MIT 는 PhysX ImplicitActuator 와 식이 같아 `Kp`/`Kd` 를
+그대로 옮길 수 있습니다.
+
+**MIT 구간에서는 토크 과부하 차단이 관측만 하고 정지시키지 않습니다.**
+남는 보호는 송신 전 급변 차단(30°)·관절 범위 검사와 모터 펌웨어의 토크 clamp 입니다.
+이유는 `controller.cpp::safety_check_recv_tmotor` 주석 참조.
 
 ### 모터 통신
 
@@ -420,10 +489,24 @@ end
 
 ## 안전 메커니즘
 
-### TMotor 전류 초과 차단
+### TMotor 과부하 차단 — 모드에 따라 다릅니다
 
-- 수신된 `current_motor_current`가 `current_limit`을 **연속 5회 초과**하면 시스템 정지
-- 일시적 과전류(스파이크)는 카운터가 리셋되어 무시됨 (`Motor::cnt`)
+**서보 모드(`VEL`/`POS`)** — 수신된 `current_motor_current` 가 `current_limit` 을
+**연속 5회 초과**하면 시스템 정지. 일시적 스파이크는 카운터가 리셋되어 무시됩니다(`Motor::cnt`).
+
+**MIT 모드** — 토크가 `mit_torque_safety` 를 넘으면 **로그만 남기고 정지시키지 않습니다.**
+이 검사는 제어 항이 아니라 감시이고(`tau` 식에 아무것도 더하지 않으므로 학습과 실기의
+제어 법칙은 그대로 같습니다), 오발동하면 연주 중에 로봇이 멈춰 **학습에 없던 실패 양식을
+추가**하게 됩니다. 임계값 자체가 피크 토크 추정치이고 펌웨어가 이미 거기서 clamp 하므로
+오발동 위험이 큽니다.
+
+남는 보호는 아래 셋입니다:
+
+- 모터 펌웨어의 토크 clamp (하드웨어 보호는 원래 이쪽 담당)
+- 송신 전 급변 차단 / 관절 범위 검사 (위치 기반이라 오발동이 적음)
+- 수신 후 관절 범위 초과 → 즉시 정지
+
+실기 로그로 정상 연주 중 최대 토크를 확인한 뒤, 여유를 두고 되살릴 수 있습니다.
 
 ### IK 실패 처리
 
@@ -433,7 +516,8 @@ end
 
 ### 송신 전 안전 검사 (TMotor)
 
-- **급변 차단**: 목표 위치와 현재 위치 차이가 **10도(약 0.175 rad)** 이상이면 해당 모터 송신 건너뜀
+- **급변 차단**: 목표 위치와 현재 위치 차이가 **30도(약 0.524 rad)** 이상이면 해당 모터 송신 건너뜀
+  (`POS_DIFF_LIMIT`. 정책 구간에도 그대로 걸립니다)
 - **범위 검사**: `motors.json`의 `min_angle` / `max_angle`을 벗어나면 송신 건너뜀
 - MaxonMotor / Dynamixel은 송신 전 검사 없음 (모터 자체 제한에 의존)
 
@@ -454,8 +538,34 @@ end
 
 ### 빌드
 
+최초 1회 — ONNX Runtime 을 받습니다 (sha256 고정):
+
+```bash
+bash drumrobot_server/lib/onnxruntime/fetch.sh
+```
+
+이후:
+
 ```bash
 make
+```
+
+**검증 도구** (별도 빌드, `main.out` 에 포함되지 않음):
+
+```bash
+cd drumrobot_server
+make ort-check      # ORT 링크·rpath, 그래프 입출력 규약, 추론 시간
+make obs-check      # obs 조립 단위검사
+make score-check    # 악보 파싱·양자화·세기변환·밀도
+make golden-check   # sim 이 만든 값 vs C++ 이 만든 값 요소별 대조
+```
+
+도구는 저장소 최상위에서 실행합니다:
+
+```bash
+./drumrobot_server/bin/ort_check
+./drumrobot_server/bin/golden_check
+./drumrobot_server/bin/score_check drumrobot_server/data/policy/obs_constants.json BasicFillin
 ```
 
 ### 실행
@@ -465,6 +575,10 @@ TCP 서버로 실행됩니다 (포트 1951):
 ```bash
 sudo ./drumrobot_server/bin/main.out
 ```
+
+> **반드시 저장소 최상위에서 실행하세요.** 설정 파일 경로가 `drumrobot_server/config/…`
+> 로 되어 있어, 다른 디렉터리에서 띄우면 `Failed to open config/kinematics.json` 이 뜨고
+> **링크 길이가 0 으로 읽혀 FK 가 전부 0 을 반환합니다.**
 
 또는 최상위 Makefile 사용:
 
@@ -489,6 +603,153 @@ python3 drumrobot_client/main.py
 - **Maxon 보간**: `send_loop`에서 5ms 구간을 1ms × 5 스텝으로 분할해 CSP 위치를 선형 보간 전송. 5ms 시점에 TMotor / Maxon / Dynamixel 동시 송신
 - **`virtual_maxon_motor`**: 소켓당 Maxon 모터 1개를 대표로 선정해 Sync 프레임(0x80) 전송에 사용
 - **Logger**: 런타임에 `drumrobot_server/log/`에 `log_MMDD_HHmm_{name}.csv` 생성 (motor / trajectory / motion_command)
+
+---
+
+## RL 정책
+
+### 무엇을 대체하나
+
+연주(`Playing`) 구간의 **팔 9관절(허리 0 · 양팔 1~6 · 양손목 7,8)** 만 정책이 소유합니다.
+
+| | 소유자 |
+|---|---|
+| 팔 0~8, `Playing` 구간 | **정책** |
+| 팔 0~8, 전이 궤적(`START`/`END`)·`Idle`·`POSE`·`HIT` | planner (기존 개루프) |
+| 발 9,10 · 머리 11,12 | 항상 planner |
+
+소유권은 전역 플래그가 아니라 **`ControlSetPoint::policy_owns_arm` 에 실려 전달**됩니다.
+궤적은 약 100ms 앞서 생성되고 `send_loop` 은 나중에 소비하므로, 두 시점에 플래그를
+따로 읽으면 경계에서 어긋나 팔에 `q=0` 이 나갈 수 있기 때문입니다.
+
+### 학습 쪽과의 계약
+
+`data/policy/obs_constants.json` 하나가 계약서입니다. **주기·게인·판정 상수·관절 순서가
+전부 여기서 들어오므로, 학습 설정을 바꿔도 C++ 은 재빌드가 필요 없습니다** — 재export 만 하면 됩니다.
+
+| 항목 | 값 |
+|---|---|
+| 관측 | 148차원 — `joint_pos(9) joint_vel(9) tip_pos(6) drum_pos(24) next_hits(66) hit_armed(16) arm_role(2) per_arm(16)` |
+| 그래프 입력 | 9개 원시 버퍼 (**정규화는 그래프 내부**에서) |
+| 위치 단위 | 허리 기준 미터 |
+| 관절 순서 | obs 순서 ≠ 모터 id. `[0, 2, 1, 5, 3, 6, 4, 8, 7]` |
+| 액션 | 관절 각속도. `q_target = q_now + a × action_scale × policy_dt` |
+| 주기 | `POLICY_TICK_STRIDE`(3) × 5ms = **15ms (66.7Hz)** |
+
+### 정책을 켜지 않는 조건 — 모두 개루프로 안전 강등
+
+- `obs_constants.json` 없음 / 무효
+- ONNX 세션 생성 실패, 그래프 입출력 이름·개수 불일치
+- **주기 불일치** — `obs_constants.json` 의 `policy_tick_stride`·`policy_dt` 가
+  `robot_config.hpp` 의 `ROBOT::` 상수와 다름
+- 팔 모터 0~8 중 결번, 관절 한계 뒤집힘
+- `tmotor_mit == false`
+
+주기 불일치를 하드 가드로 막는 이유는, 그것이 **조용히 틀리고 로그에도 남지 않는**
+종류의 오류이기 때문입니다. 정책이 학습한 것과 다른 간격으로 적분됩니다.
+
+### 경계를 지키는 세 장치
+
+| 장치 | 막는 것 |
+|---|---|
+| **seqlock** (`PolicyTarget`, `JointSnapshot`) | 찢어진 값 — 72바이트를 나눠 쓰는 사이 읽어 *실재하지 않는 자세*가 나가는 것. 읽는 쪽(실시간 루프)이 절대 막히지 않습니다 |
+| **워치독** (`3 × STRIDE` = 9틱 = 45ms) | 낡은 값 — 슬롯이라 정책이 죽어도 마지막 값이 남아 모르고 지나가는 것 |
+| **소유권 동봉** (`policy_owns_arm`) | 경계 어긋남 — 생성과 소비가 플래그를 따로 읽는 것 |
+
+### 학습 저장소
+
+정책은 별도 저장소에서 Isaac Lab 으로 학습합니다. 배포용 스크립트 세 개가 계약을 잇습니다:
+
+| 스크립트 | 하는 일 |
+|---|---|
+| `export_policy.py` | 체크포인트 → `policy.onnx` + `obs_constants.json`. `--motors-json` 을 주면 **손목 CST 게인이 학습과 맞는지 대조**하고 어긋나면 중단합니다 |
+| `dump_golden.py` | sim 을 exported onnx 로 굴려 `golden.json` 생성 |
+| `dump_conventions.py` | 관절 순서·한계·리셋 자세 덤프 |
+
+### 검증 상태
+
+`golden_check` 가 sim 이 만든 값과 C++ 이 만든 값을 요소별로 대조합니다.
+스케줄러 90여 줄과 재장전 상태머신을 손으로 옮긴 것이라, 실기 전에 잡는 것이 목적입니다.
+
+| 버퍼 | 결과 |
+|---|---|
+| `joint_pos` · `joint_vel` · `drum_pos` · `arm_role` | **오차 0** |
+| `tip_pos` · `hit_armed` · `per_arm_pos` · `per_arm_time` | 스틱 길이 12mm 차이에서 옴 (아래 참조) |
+
+성능: obs 조립 p99 1.2 µs, ONNX 추론 p99 20 µs — **예산 15,000 µs 의 0.3%**.
+
+---
+
+## 알려진 미확정 사항
+
+실기 검증 전이므로 아래는 확정되지 않았습니다.
+
+### 스틱 길이 — 373mm 인가 385mm 인가
+
+`kinematics.json` 의 `stick` 은 **0.373** 입니다(실기가 지금까지 연주해 온 값).
+학습 쪽 `tip_offset` 은 0.385 입니다. 이 12mm 차이 하나가 골든 테스트의 남은
+불일치를 전부 설명합니다 — 0.385 로 바꾸면 `tip_pos` 오차가 12.7mm→1.4mm,
+`hit_armed` 불일치가 38→3(전부 step 0), `per_arm_*` 이 0 이 됩니다.
+
+**어느 쪽이 물리적으로 맞는지는 실측으로만 정해집니다.** 실제가 373mm 인데 0.385 로
+두면 개루프도 정책도 **자세와 무관하게 정확히 12.0mm 짧게** 칩니다(드럼 접촉 반경 130mm 의 9%).
+
+확정 방법 — `HIT|snare` 타격 위치를 보거나, 손목 회전축 중심에서 스틱 타격점까지 실측.
+
+### MIT 프로토콜 상수
+
+원본 코드가 `P`·`KP`·`KD` 범위는 초기화해 두었고 `V`·`T` 는 비워 두었습니다.
+그 빈 자리를 MIT 표준 관례로 채웠고, **확인되지 않았습니다.**
+
+| 값 | 위험 |
+|---|---|
+| `mit_v_limit = 50` | 틀리면 `joint_vel` 이 잘못된 배율로 obs 에 들어갑니다. **어떤 안전 검사도 속도를 보지 않습니다** |
+| `mit_t_limit` 65 / 25 | 토크 읽기가 틀어집니다 |
+| `mit_kp_max = 500`, `mit_kd_max = 5` | 실제 범위와 다르면 **그 비율만큼 다른 게인이 걸립니다.** 어떤 코드 검사로도 잡히지 않습니다 |
+
+**검증 방법** — 토크 인가 상태에서 팔을 0.05 rad 밀어 잡고 로그의 토크를 읽습니다.
+`Kp_실효 = 토크 ÷ 0.05` 가 100 이면 세 상수가 한 번에 검증됩니다.
+
+### 실기에서 아직 돌지 않은 것
+
+MIT 송수신 경로 전체 · MIT 진입 절차 · 게인 램프 · ERPM→rad/s 변환 ·
+소유권 전환 · 워치독 · 정책 구동. **모두 코드 수준 검증만 되어 있습니다.**
+
+---
+
+## 실기 브링업 순서
+
+정책부터 켜지 않습니다. 네 단계로 올립니다.
+
+| 단계 | 설정 | 확인할 것 |
+|---|---|---|
+| **0** 기존 서보 | `tmotor_mit: false`, 정책 OFF | 예전과 같이 연주되는가. `HIT|snare` 타격 위치 |
+| **1** MIT 정지 | `tmotor_mit: true`, 정책 OFF | 떨림 없이 버티는가. **토크 측정** |
+| **2** MIT 연주 | 위와 같음 | 0단계와 같은 소리·자세. 중력 처짐 없는가 |
+| **3** 정책 ON | `policy.onnx` 복구 | 소유권 전환 경계, 워치독 |
+
+**정책 끄는 법** — 코드 수정 없이 파일 이름만 바꿉니다:
+
+```bash
+mv drumrobot_server/data/policy/policy.onnx \
+   drumrobot_server/data/policy/policy.onnx.off
+```
+
+ONNX 세션 생성이 실패해 `policy_ready` 가 서지 않고, 정책 스레드가 아예 생성되지 않습니다.
+
+**첫 정책 시험** — 곡을 끝까지 들을 필요 없습니다. 15초면 진입·이탈 경계를 둘 다 봅니다:
+
+```
+PLAY|BF
+PLAY_CTRL|speed|0.5     # 절반 속도가 더 안전합니다
+   ... 15초 ...
+PLAY_CTRL|stop
+```
+
+곡은 **`BF`(BasicFillin)** 를 권합니다. 학습이 만들지 않는 밀도(간격 < 105ms)가
+48구간 있지만 **전부 90ms 로 가장 완만**하고, 오디오가 없어 변수가 하나 줄어듭니다.
+`WS`(최소 45ms)·`DS`(60ms) 는 첫 시험에 피하세요. `M1` 은 정책이 MIDI 를,
+발·머리가 txt 악보를 읽어 **서로 다른 음악을 연주할 수 있으므로** MIDI 경로 시험 전용입니다.
 
 ---
 

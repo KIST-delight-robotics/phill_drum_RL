@@ -1,8 +1,11 @@
 #include "trajectory/motion_planner.hpp"
 
-MotionPlanner::MotionPlanner(AppContext &ctxRef, CommandQueue &commandQueueRef, ControlQueue &controlQueueRef, MotionQueue &motionQueueRef, Robot &robotRef, AudioPlayer &audioRef)
+MotionPlanner::MotionPlanner(AppContext &ctxRef, CommandQueue &commandQueueRef, ControlQueue &controlQueueRef,
+                             MotionQueue &motionQueueRef, Robot &robotRef, AudioPlayer &audioRef,
+                             const PolicyConfig &policyCfgRef, PolicyScoreStore &policyScoreRef)
     : ctx(ctxRef), command_queue(commandQueueRef), control_queue(controlQueueRef), motion_queue(motionQueueRef), robot(robotRef),
-    behavior_planner(ctxRef, robotRef, audioRef), trajectory_generator(ctxRef, control_queue), motion_log("motion_command") {}
+    behavior_planner(ctxRef, robotRef, audioRef, policyCfgRef, policyScoreRef),
+    trajectory_generator(ctxRef, control_queue, robotRef), motion_log("motion_command") {}
 
 MotionPlanner::~MotionPlanner() {}
 

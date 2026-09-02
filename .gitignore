@@ -1,4 +1,18 @@
 # 런타임 생성물
 drumrobot_server/log/
 drumrobot_server/obj/
-drumrobot_server/bin/*.out
+drumrobot_server/bin/
+
+# vendoring 한 ONNX Runtime — lib/onnxruntime/fetch.sh 로 받는다 (fetch.sh 는 추적)
+drumrobot_server/lib/onnxruntime/include/
+drumrobot_server/lib/onnxruntime/lib/
+drumrobot_server/lib/onnxruntime/*.tgz
+
+# 골든 테스트 픽스처 — 학습 런마다 달라지므로 추적하지 않는다.
+# dump_golden.py 로 재생성한다 (README 의 "검증 도구" 참조).
+drumrobot_server/data/policy/golden.json
+
+# 백업·임시
+*.bak
+*.bak-*
+*~
