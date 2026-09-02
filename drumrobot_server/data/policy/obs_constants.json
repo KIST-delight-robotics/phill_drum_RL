@@ -2,7 +2,9 @@
   "_comment": "export_policy.py 가 생성. 손으로 고치지 말 것 — 재export 하면 덮어씀.",
   "checkpoint": "logs/skrl/drum_robot/2026-09-01_18-01-48_ppo_torch_drum_robot/checkpoints/best_agent.pt",
   "run": "2026-09-01_18-01-48_ppo_torch_drum_robot",
-  "source_drift_after_run": [],
+  "source_drift_after_run": [
+    "drumrobot_cfg.py"
+  ],
   "obs_dim": 148,
   "act_dim": 9,
   "opset": 13,
@@ -101,7 +103,8 @@
       "damping": 0.14
     }
   },
-  "action_delay_steps": 2,
+  "action_delay_steps_min": 2,
+  "action_delay_steps_max": 2,
   "action_scale": 11.1111,
   "wrist_action_scale": 55.5556,
   "hit_detector": {
@@ -152,7 +155,7 @@
     "drum_center_eff": [
       0.096500009,
       0.513999999,
-      -1.315500021
+      -0.315500021
     ],
     "drum_half_range": [
       0.388501018,

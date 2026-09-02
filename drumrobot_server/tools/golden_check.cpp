@@ -13,6 +13,7 @@
 // 프레임: 덤프의 tip/drum/per_arm 은 env 프레임(+z_offset). C++ 은 허리 기준이라
 //         비교 전에 z 에서 z_offset 을 뺀다.
 #include <algorithm>
+#include <utility>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -185,6 +186,67 @@ int main(int argc, char** argv) {
                 ++s_jv.n;
             }
         }
+    }
+
+    // ===== 타격 성공률 =====
+    // "obs 는 맞는데 정책이 못 친다" 를 즉시 구분하기 위한 집계.
+    // sim 의 detect_hit 은 타격을 인정하면 그 팔의 8드럼을 전부 disarm 한다.
+    // 따라서 팔 단위 armed 합계의 (>0 -> 0) 전이가 타격의 서명이다.
+    //
+    // 주의: 이건 "쳤다" 이지 "맞는 드럼을 쳤다" 가 아니다. 아래에서 악보가
+    // 요구한 시각·드럼과 대조해 정타/오타를 나눈다.
+    {
+        const auto& steps = g.at("steps");
+        int prev_armed[2] = {-1, -1};
+        std::vector<std::pair<int,int>> hits;         // (step, arm)
+        std::vector<std::pair<int,std::vector<int>>> want;  // (step, drums)
+
+        for (size_t si = 0; si < steps.size(); ++si) {
+            const auto& raw = steps[si].at("raw");
+            const auto ha = raw.at("hit_armed").get<std::vector<float>>();
+            for (int a = 0; a < 2; ++a) {
+                int sum = 0;
+                for (int d = 0; d < 8; ++d) sum += (ha[a * 8 + d] > 0.5f) ? 1 : 0;
+                if (prev_armed[a] > 0 && sum == 0) hits.push_back({(int)si, a});
+                prev_armed[a] = sum;
+            }
+            // 악보가 이번 스텝에 요구한 타격 (next_hits[k] 의 time 이 0 스텝)
+            const auto nh = raw.at("next_hits").get<std::vector<float>>();
+            for (int k = 0; k < 6; ++k) {
+                const int b = k * 11;
+                if (nh[b + 9] <= 0.5f) continue;
+                if (nh[b + 8] * (cfg.max_lookahead_step - 1) >= 0.5f) continue;
+                std::vector<int> ds;
+                for (int d = 0; d < 8; ++d) if (nh[b + d] > 0.5f) ds.push_back(d);
+                if (!want.empty() && (int)si - want.back().first <= 1) break;
+                want.push_back({(int)si, ds});
+                break;
+            }
+        }
+
+        // 요구 타격마다 ±hit_window_step 안에 타격이 있었나
+        const int W = cfg.hit_window_step;
+        int matched = 0;
+        std::vector<bool> used(hits.size(), false);
+        for (const auto& [ws, ds] : want) {
+            for (size_t h = 0; h < hits.size(); ++h) {
+                if (used[h]) continue;
+                if (std::abs(hits[h].first - ws) <= W) { used[h] = true; ++matched; break; }
+            }
+        }
+        const int extra = (int)hits.size() - matched;
+
+        printf("\n타격 집계 (sim 판정 재현)\n");
+        printf("  악보 요구        %d회\n", (int)want.size());
+        printf("  타격 감지        %d회   (왼 %d / 오른 %d)\n", (int)hits.size(),
+               (int)std::count_if(hits.begin(), hits.end(), [](auto& x){ return x.second == 0; }),
+               (int)std::count_if(hits.begin(), hits.end(), [](auto& x){ return x.second == 1; }));
+        printf("  창(±%d스텝) 안 매칭  %d회  -> %.0f%%\n", W, matched,
+               want.empty() ? 0.0 : 100.0 * matched / want.size());
+        if (extra > 0) printf("  창 밖 타격       %d회  (오타 또는 리바운드)\n", extra);
+        if (hits.empty() && !want.empty())
+            printf("  ** 타격 0회 — obs 가 맞아도 정책이 못 치고 있습니다.\n"
+                   "     정규화 상수(그래프 내부)를 의심하세요. verify_export.py 참조\n");
     }
 
     printf("\n대조 결과 (%d 스텝, 허용오차 %.1e)\n", done, tol);
