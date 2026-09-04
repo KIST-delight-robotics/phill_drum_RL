@@ -9,7 +9,7 @@
             "initial_joint_angle": 10.0,
             "min_angle": -90.0,
             "max_angle": 90.0,
-            "node_id": "0x00",
+            "node_id": "0x11",
             "model": "AK10_9",
             "gear_ratio": 9,
             "current_limit": 29.8,
