@@ -631,6 +631,7 @@ void Controller::distribute_frames() {
                     maxon->current_torque      = torque;
                     maxon->status_bit          = status;
                     maxon->current_joint_angle = maxon->motor_position_to_joint_angle(pos);
+                    maxon->first_recv_done     = true;
 
                     if (!safety_check_recv_maxon(maxon)) {
                         is_safe = false;

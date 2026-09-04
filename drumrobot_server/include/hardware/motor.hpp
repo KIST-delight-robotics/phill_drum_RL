@@ -16,6 +16,16 @@
 
 class Motor{
 public:
+    // 이 모터의 피드백이 한 번이라도 들어왔는지.
+    //
+    // current_joint_angle 의 초기값은 0 이고, 그것을 실측으로 오인하면
+    // 궤적이 엉뚱한 곳에서 출발한다.
+    //   실측 2026-09-04: START 에서 Maxon 손목이 아직 보고하지 않은 상태로
+    //   동기화해 last_q[7]=0 이 되고, sample(0 -> 70도) 가 되어 손목이 크게 젖혀졌다.
+    // Maxon 피드백은 SYNC 프레임이 있어야 오고 SYNC 는 send_active 이후이므로,
+    // START 시점에는 구조적으로 값이 없다 — 그때는 기존 last_q 를 유지해야 한다.
+    bool first_recv_done = false;
+
     Motor(int id);
     virtual ~Motor();
 
@@ -88,8 +98,6 @@ public:
     int cnt = 0;
     int guard_cnt = 0;      // 송신 전 가드 연속 트립 횟수. 로그를 1초에 한 번으로 줄이는 데 쓴다
 
-    // 수신이 한 번이라도 되었는지 확인
-    bool first_recv_done = false;
 private:
 };
 

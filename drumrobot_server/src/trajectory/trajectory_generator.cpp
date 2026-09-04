@@ -392,13 +392,27 @@ bool TrajectoryGenerator::sync_last_q_from_robot() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
+    // 피드백이 들어온 관절만 덮는다.
+    //
+    // current_joint_angle 의 초기값 0 을 실측으로 오인하면 궤적이 엉뚱한 곳에서
+    // 출발한다. Maxon 손목은 SYNC 프레임이 있어야 보고하고 SYNC 는 send_active
+    // 이후이므로, START 시점에는 값이 없다 — 그때는 init 자세로 둔 last_q 가 맞다.
+    //   실측 2026-09-04: 이 검사가 없어 last_q[7]=0 이 되고 sample(0 -> 70도) 가
+    //   CSP 로 나가 손목이 크게 젖혀졌다.
+    // 연주 반납(release_policy) 시점에는 이미 피드백이 있으므로 정상적으로 덮인다.
+    int synced = 0, skipped = 0;
     for (int j = 0; j < JointID::NUM_ARM; ++j) {
         auto it = robot.motors.find(j);
         if (it == robot.motors.end()) continue;
+        if (!it->second->first_recv_done) { ++skipped; continue; }
         last_q[j] = it->second->current_joint_angle;
         last_qd[j] = 0.0;
+        ++synced;
     }
-    std::cerr << "[TrajectoryGenerator] last_q를 실측으로 동기화 (팔 0~8)\n";
+    std::cerr << "[TrajectoryGenerator] last_q를 실측으로 동기화 — "
+              << synced << "개 반영";
+    if (skipped) std::cerr << ", " << skipped << "개 피드백 없어 유지";
+    std::cerr << "\n";
     return true;
 }
 
