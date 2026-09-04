@@ -53,6 +53,211 @@ bash drumrobot_server/lib/onnxruntime/fetch.sh
 
 ---
 
+## 새 컴퓨터에서 처음 돌리기
+
+`git pull` 이후 필요한 것은 **ONNX Runtime 내려받기 하나**입니다.
+정책 모델(`policy.onnx`)과 상수(`obs_constants.json`)는 저장소에 포함돼 있어
+따로 옮기지 않습니다.
+
+### 1. 저장소
+
+```bash
+git remote -v                       # rl 원격이 있는지 확인
+git fetch rl
+git checkout main
+git pull rl main
+```
+
+`policy.onnx` (410KB) 와 `obs_constants.json` 이 함께 내려옵니다.
+학습 쪽에서 정책을 다시 export 했다면 그 두 파일만 갱신해 커밋하면 됩니다.
+
+### 2. ONNX Runtime (최초 1회, 네트워크 필요)
+
+```bash
+bash drumrobot_server/lib/onnxruntime/fetch.sh
+```
+
+v1.23.2 를 받아 sha256 을 검증합니다. Makefile 이 `$ORIGIN` 상대 rpath 로
+링크하므로 **시스템 설치는 필요 없습니다.** 이미 있으면 건너뜁니다.
+
+> `onnxruntime-linux-**x64**` 를 받습니다. x86-64 리눅스여야 합니다.
+
+### 3. 빌드
+
+```bash
+make -C drumrobot_server
+```
+
+### 4. 로봇 없이 확인 — 여기까지는 모터 없이 됩니다
+
+```bash
+make -C drumrobot_server ort-check       # 모델 로드 + 추론 지연
+make -C drumrobot_server golden-check    # 관측 조립을 sim 덤프와 대조
+make -C drumrobot_server score-check     # 악보 파싱 · 곡 밀도
+```
+
+| 도구 | 통과 기준 |
+|---|---|
+`ort-check` | 세션 생성 성공, p99 추론 시간이 예산(15,000µs) 대비 충분히 작음 |
+`golden-check` | `joint_pos` · `joint_vel` · `drum_pos` · `arm_role` · `per_arm_pos` · `per_arm_time` 오차 0 |
+| | `tip_pos` · `hit_armed` 불일치는 **스틱 길이 미확정(373 vs 385mm)** 에서 오는 알려진 항목 |
+
+**`ort-check` 가 실패하면 2번을 다시 하십시오.** 그 외 단계로 넘어가도 소용없습니다.
+
+### 5. 이 머신을 `can_ports.json` 에 등록
+
+USB-CAN 어댑터를 강제 재인식시키는 데 쓰는 항목입니다.
+**등록하지 않아도 동작합니다** — 리셋만 건너뜁니다.
+
+```bash
+hostname                            # 이 값이 키가 된다
+```
+
+```json
+{
+  "machines": {
+    "shy-desktop":            { "hub": "1-4",   "ports": [1, 2, 3, 4] },
+    "shy-MINIPC-VC66-C2":     { "hub": "1-6.1", "ports": [1] },
+    "shy":                    { "hub": "",      "ports": [] }
+  }
+}
+```
+
+- `hub` — **그 컴퓨터의 USB 토폴로지 주소.** `uhubctl -l` 로 확인합니다.
+  다른 머신 값을 복사하면 없는 허브를 껐다 켜려다 실패합니다.
+- `ports` — 어댑터가 꽂힌 허브 포트 번호
+- 둘 중 하나가 비면 `No CAN reset needed for <host>` 를 찍고 넘어갑니다
+
+```bash
+command -v uhubctl || sudo apt install uhubctl
+```
+
+### 6. CAN 인터페이스
+
+**인터페이스를 올리는 것은 코드가 합니다.** `ip link show | grep can` 으로
+존재하는 `canN` 을 모두 찾아 1 Mbps 로 올립니다 (`activateCanPort`).
+`make run` 이 sudo 로 돌기 때문에 미리 올려둘 필요가 없습니다.
+
+**어댑터 개수는 로봇의 CAN 버스 수와 같아야 합니다.**
+모터가 어느 버스에 있는지는 `motors.json` 에 적혀 있지 않고,
+`set_motors_socket()` 이 **모든 소켓에 물어보고 응답한 곳으로 배정**합니다.
+버스가 4개인데 어댑터가 1개면 그 버스의 모터만 잡힙니다.
+
+### 7. 첫 실행
+
+```bash
+make run
+```
+
+시동 로그에서 **`Connected` 아홉 줄** 을 세십시오:
+
+```
+[Robot] --------------> CAN NODE ID 17 Connected. Joint 0: waist
+[Robot] --------------> CAN NODE ID 1  Connected. Joint 1: right_shoulder_1
+...
+[Robot] --------------> CAN NODE ID 8  Connected. Joint 8: left_wrist
+[PolicyRunner] 준비 완료 — 주기 15ms (66.6667Hz), stride 3
+```
+
+**`Joint 0` ~ `Joint 8` 이 전부 있어야 정책이 팔을 인수합니다.**
+하나라도 빠지면 `팔 모터 N 결번 — 개루프로 연주합니다` 를 찍고
+**연주는 계속되지만 정책은 조용히 꺼집니다.**
+
+첫 회차는 `PLAY` 없이 `START` → `READY` → `QUIT` 으로
+토크 인가·유지·해제만 확인하십시오.
+
+---
+
+## CAN 통신이 안 될 때
+
+모터가 전부 `Not Connected` 로 나오면 개별 설정이 아니라 버스 문제입니다.
+`can-utils` 없이 확인할 수 있습니다.
+
+### 상태 먼저
+
+```bash
+ip -d link show can0 | grep -E "state|can state|bitrate"
+```
+
+```
+can state ERROR-ACTIVE  (berr-counter tx 0 rx 0)      정상
+can state ERROR-PASSIVE (berr-counter tx 128 rx 0)    아래 표 참조
+state DOWN                                            인터페이스가 내려가 있음
+```
+
+인터페이스가 내려가 있으면:
+
+```bash
+sudo ip link set can0 up type can bitrate 1000000 restart-ms 100
+```
+
+### 판정
+
+| `tx` 카운터 | `rx` | 뜻 | 확인할 것 |
+|---|---|---|---|
+0 | 0 | 송신 자체가 안 나감 | 어댑터 · 드라이버 · 인터페이스 DOWN |
+**증가** | **0** | **보내는데 아무도 안 들음** | 로봇 전원 · CAN 선 · `CAN_H`/`CAN_L` 반전 · 종단저항 120Ω · 선이 그 버스에 닿는지 |
+0 | 증가 | 정상 수신 중 | 노드 id · 비트레이트 |
+
+CAN 은 프레임이 성립하려면 **최소 두 노드**가 필요합니다. 보낸 쪽이 ACK 비트를
+읽지 못하면 재시도하며 `tx` 가 오르고, 128 에서 `ERROR-PASSIVE` 가 됩니다.
+**`tx` 가 오르고 `rx` 가 0 이면 버스에 자기 혼자 있는 것입니다.**
+
+### 노드별로 찔러보기
+
+MIT 모드 모터는 스스로 프레임을 뿌리지 않으므로 수동 청취로는 판단할 수 없습니다.
+제어 모드 진입 프레임(`FF FF FF FF FF FF FF FC`)을 보내고 응답을 봅니다.
+
+```bash
+# 파이썬 raw CAN 소켓. 별도 설치 불필요
+python3 - <<'EOF'
+import socket, struct, sys
+FMT = "=IB3x8s"
+NODES = {0x11:"waist", 0x01:"r_sh1", 0x02:"l_sh1", 0x03:"r_sh2",
+         0x04:"r_elb", 0x05:"l_sh2", 0x06:"l_elb"}
+s = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+s.bind(("can0",)); s.settimeout(0.15)
+try:
+    while True: s.recv(struct.calcsize(FMT))     # 묵은 프레임 비우기
+except socket.timeout: pass
+for nid, name in NODES.items():
+    s.send(struct.pack(FMT, nid, 8, bytes([0xFF]*7 + [0xFC])))
+    try:
+        cid, dlc, d = struct.unpack(FMT, s.recv(struct.calcsize(FMT)))
+        hit = " <- data[0] 일치" if dlc and d[0] == nid else ""
+        print(f"0x{nid:02X} {name:6s} 응답 can_id 0x{cid & 0x1FFFFFFF:03X} "
+              f"{' '.join(f'{b:02X}' for b in d[:dlc])}{hit}")
+    except socket.timeout:
+        print(f"0x{nid:02X} {name:6s} 무응답")
+EOF
+```
+
+- **`data[0] 일치`** 가 보이면 MIT 모드까지 확인된 것입니다.
+  MIT 는 `can_id` 가 0 으로 오고 식별자가 `data[0]` 에 들어옵니다
+  (서보 모드는 `can_id` 하위 바이트).
+- 일부만 응답하면 그 노드들만 살아 있는 것이니 CubeMars 설정을 보십시오.
+- 전부 무응답이면 위 판정 표로 돌아가십시오.
+
+### 비트레이트 확인
+
+코드는 **1 Mbps 고정**입니다 (`activateCanPort`). CubeMars 에서 MIT 모드를
+설정할 때 baud rate 를 함께 바꿨다면 여기서 걸립니다.
+
+```bash
+for BR in 1000000 500000 250000 125000; do
+    sudo ip link set can0 down
+    sudo ip link set can0 up type can bitrate $BR restart-ms 100
+    echo "--- $BR ---"
+    # 위 파이썬 조각을 여기서 실행
+done
+sudo ip link set can0 up type can bitrate 1000000 restart-ms 100   # 복원
+```
+
+> `sudo` 자격이 만료되면 `down` 은 되고 `up` 은 실패해 인터페이스가
+> 내려간 채로 남을 수 있습니다. 스크립트로 묶어 `sudo` 로 한 번에 돌리십시오.
+
+---
+
 ## 운용 절차 (전원 ON ~ 연주)
 
 이 로봇은 안전을 위해 **고정 키(locking pin)** 로 초기 위치를 잡은 뒤 단계적으로 활성화합니다. 절차를 반드시 지켜야 합니다.
