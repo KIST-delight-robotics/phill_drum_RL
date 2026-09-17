@@ -190,26 +190,68 @@ int main(int argc, char** argv) {
 
     // ===== 타격 성공률 =====
     // "obs 는 맞는데 정책이 못 친다" 를 즉시 구분하기 위한 집계.
-    // sim 의 detect_hit 은 타격을 인정하면 그 팔의 8드럼을 전부 disarm 한다.
-    // 따라서 팔 단위 armed 합계의 (>0 -> 0) 전이가 타격의 서명이다.
+    // sim hit_detector.py::_check_hitting 과 같은 조건을 골든 값으로 직접 센다.
+    //   접촉(최근접 드럼 하나) && ★직전 스텝★ 그 드럼이 armed && 하강속도 > min_impact_velocity
     //
-    // 주의: 이건 "쳤다" 이지 "맞는 드럼을 쳤다" 가 아니다. 아래에서 악보가
-    // 요구한 시각·드럼과 대조해 정타/오타를 나눈다.
+    // armed 합계의 (>0 -> 0) 전이로 세면 안 된다 — 그건 팔 단위 disarm 시절의 서명이고,
+    // sim 이 2026-09-10 에 드럼별 disarm 으로 바꾸면서 무효가 됐다 (닿은 드럼 하나만 꺼지고
+    // 나머지 7개는 장전을 유지하므로 합계가 0 으로 떨어지지 않는다). 그대로 두면 실제 8회를
+    // 1회로 세어 "정책이 못 친다" 는 거짓 경보가 난다.
+    //
+    // raw.hit_armed 는 갱신 '후' 값이라 접촉 순간엔 이미 0 이다. 반드시 한 스텝 지연시킬 것.
     {
         const auto& steps = g.at("steps");
-        int prev_armed[2] = {-1, -1};
-        std::vector<std::pair<int,int>> hits;         // (step, arm)
+        struct Hit { int step, arm, drum; };
+        std::vector<Hit> hits;
         std::vector<std::pair<int,std::vector<int>>> want;  // (step, drums)
+
+        std::vector<float> prev_ha;                          // 직전 스텝 armed
+        double tip_prev[2][3] = {}, tip_vel[2][3] = {};      // 팁 속도 (obs_builder 와 같은 alpha)
+        bool tip_seeded = false;
+        const double r2 = cfg.drum_xy_radius * cfg.drum_xy_radius;
 
         for (size_t si = 0; si < steps.size(); ++si) {
             const auto& raw = steps[si].at("raw");
-            const auto ha = raw.at("hit_armed").get<std::vector<float>>();
-            for (int a = 0; a < 2; ++a) {
-                int sum = 0;
-                for (int d = 0; d < 8; ++d) sum += (ha[a * 8 + d] > 0.5f) ? 1 : 0;
-                if (prev_armed[a] > 0 && sum == 0) hits.push_back({(int)si, a});
-                prev_armed[a] = sum;
+            const auto ha  = raw.at("hit_armed").get<std::vector<float>>();
+            const auto tp  = raw.at("tip_pos").get<std::vector<float>>();
+            const auto dpv = raw.at("drum_pos").get<std::vector<float>>();
+
+            if (!tip_seeded) {
+                for (int a = 0; a < 2; ++a)
+                    for (int k = 0; k < 3; ++k) tip_prev[a][k] = tp[a * 3 + k];
+                tip_seeded = true;
+            } else {
+                const double al = cfg.tip_vel_filter_alpha;
+                for (int a = 0; a < 2; ++a) {
+                    for (int k = 0; k < 3; ++k) {
+                        const double v = (tp[a * 3 + k] - tip_prev[a][k]) / step_dt;
+                        tip_vel[a][k] = al * v + (1.0 - al) * tip_vel[a][k];
+                        tip_prev[a][k] = tp[a * 3 + k];
+                    }
+                }
             }
+
+            if (!prev_ha.empty()) {
+                for (int a = 0; a < 2; ++a) {
+                    int nearest = -1;
+                    double best = std::numeric_limits<double>::infinity();
+                    for (int d = 0; d < 8; ++d) {
+                        const double dx = tp[a * 3 + 0] - dpv[d * 3 + 0];
+                        const double dy = tp[a * 3 + 1] - dpv[d * 3 + 1];
+                        const double dz = tp[a * 3 + 2] - dpv[d * 3 + 2];
+                        const double dxy2 = dx * dx + dy * dy;
+                        if (dxy2 > r2 || dz < 0.0 || dz > cfg.drum_z_range) continue;
+                        const double d2 = dxy2 + dz * dz;
+                        if (d2 < best) { best = d2; nearest = d; }
+                    }
+                    if (nearest >= 0 && prev_ha[a * 8 + nearest] > 0.5f &&
+                        tip_vel[a][2] < -cfg.min_impact_velocity) {
+                        hits.push_back({(int)si, a, nearest});
+                    }
+                }
+            }
+            prev_ha = ha;
+
             // 악보가 이번 스텝에 요구한 타격 (next_hits[k] 의 time 이 0 스텝)
             const auto nh = raw.at("next_hits").get<std::vector<float>>();
             for (int k = 0; k < 6; ++k) {
@@ -224,25 +266,37 @@ int main(int argc, char** argv) {
             }
         }
 
-        // 요구 타격마다 ±hit_window_step 안에 타격이 있었나
+        // 요구 타격마다 ±hit_window_step 안에 타격이 있었나.
+        // 두 번 센다: 시간만(제때 쳤나) / 시간+드럼(제때 맞는 걸 쳤나).
+        // 두 값이 갈라지면 "박자는 맞는데 엉뚱한 드럼" 이라는 뜻이다.
         const int W = cfg.hit_window_step;
-        int matched = 0;
-        std::vector<bool> used(hits.size(), false);
-        for (const auto& [ws, ds] : want) {
-            for (size_t h = 0; h < hits.size(); ++h) {
-                if (used[h]) continue;
-                if (std::abs(hits[h].first - ws) <= W) { used[h] = true; ++matched; break; }
-            }
+        int matched_t = 0, matched_td = 0;
+        {
+            std::vector<bool> u(hits.size(), false);
+            for (const auto& [ws, ds] : want)
+                for (size_t h = 0; h < hits.size(); ++h)
+                    if (!u[h] && std::abs(hits[h].step - ws) <= W) { u[h] = true; ++matched_t; break; }
         }
-        const int extra = (int)hits.size() - matched;
+        {
+            std::vector<bool> u(hits.size(), false);
+            for (const auto& [ws, ds] : want)
+                for (size_t h = 0; h < hits.size(); ++h)
+                    if (!u[h] && std::abs(hits[h].step - ws) <= W &&
+                        std::find(ds.begin(), ds.end(), hits[h].drum) != ds.end()) {
+                        u[h] = true; ++matched_td; break;
+                    }
+        }
+        const int extra = (int)hits.size() - matched_t;
 
         printf("\n타격 집계 (sim 판정 재현)\n");
         printf("  악보 요구        %d회\n", (int)want.size());
         printf("  타격 감지        %d회   (왼 %d / 오른 %d)\n", (int)hits.size(),
-               (int)std::count_if(hits.begin(), hits.end(), [](auto& x){ return x.second == 0; }),
-               (int)std::count_if(hits.begin(), hits.end(), [](auto& x){ return x.second == 1; }));
-        printf("  창(±%d스텝) 안 매칭  %d회  -> %.0f%%\n", W, matched,
-               want.empty() ? 0.0 : 100.0 * matched / want.size());
+               (int)std::count_if(hits.begin(), hits.end(), [](const Hit& x){ return x.arm == 0; }),
+               (int)std::count_if(hits.begin(), hits.end(), [](const Hit& x){ return x.arm == 1; }));
+        printf("  제때 침 (±%d스텝)     %d회  -> %.0f%%\n", W, matched_t,
+               want.empty() ? 0.0 : 100.0 * matched_t / want.size());
+        printf("  제때 + 맞는 드럼     %d회  -> %.0f%%   <- 실제 성공률\n", matched_td,
+               want.empty() ? 0.0 : 100.0 * matched_td / want.size());
         if (extra > 0) printf("  창 밖 타격       %d회  (오타 또는 리바운드)\n", extra);
         if (hits.empty() && !want.empty())
             printf("  ** 타격 0회 — obs 가 맞아도 정책이 못 치고 있습니다.\n"

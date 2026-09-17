@@ -94,6 +94,9 @@ public:
     double current_motor_current  = 0.0;   // 서보 모드 피드백 전류 [A] (MIT 모드에서는 미사용)
     double current_torque_mit = 0.0;       // MIT 모드 피드백 토크 [N·m]
 
+    // 모터 펌웨어가 보고하는 에러 코드. 0 이 아니면 정상 상태가 아니다.
+    int current_error = 0;
+
     // 과전류 체크 카운터
     int cnt = 0;
     int guard_cnt = 0;      // 송신 전 가드 연속 트립 횟수. 로그를 1초에 한 번으로 줄이는 데 쓴다

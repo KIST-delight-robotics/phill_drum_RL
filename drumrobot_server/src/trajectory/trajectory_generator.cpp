@@ -1,8 +1,9 @@
 #include <thread>
 #include "trajectory/trajectory_generator.hpp"
 
-TrajectoryGenerator::TrajectoryGenerator(AppContext& ctxRef, ControlQueue &controlQueueRef, Robot& robotRef)
-    : ctx(ctxRef), control_queue(controlQueueRef), robot(robotRef),
+TrajectoryGenerator::TrajectoryGenerator(AppContext& ctxRef, ControlQueue &controlQueueRef, Robot& robotRef,
+                                         const PolicyScoreStore &policyScoreRef)
+    : ctx(ctxRef), control_queue(controlQueueRef), robot(robotRef), policy_score(policyScoreRef),
       play_motion_generator(ctxRef), trajectory_log("trajectory") {
     
     std::vector<std::string> header = {
@@ -188,6 +189,15 @@ void TrajectoryGenerator::generate_task_space_trajectory(const MotionPrimitive& 
 
 void TrajectoryGenerator::generate_play_start_trajectory(const MotionPrimitive& motion) {
     std::array<ControlMode, ROBOT::NUM_JOINT> modes = get_modes();
+
+    // 예열 구간의 악보 시각을 0 으로 되돌린다.
+    //
+    // acquire_policy 는 이 전이 궤적을 전부 밀어 넣은 뒤에 불리므로, 정책은 궤적이
+    // 소비되는 4초 동안 예열하며 그 setpoint 들의 t_score 를 읽는다. 두 번째 곡부터는
+    // 여기에 앞 곡의 끝 시각이 남아 있어, 예열이 엉뚱한 시점으로 돌다가 연주 시작에서
+    // 뒤로 점프한다 (ObsBuilder reset 이 예열보다 먼저 일어난다).
+    cur_t_score = 0.0;
+
     double t_total = 4.0;
     int num_point = static_cast<int>(t_total / ROBOT::DT_SECOND);
 
@@ -252,6 +262,19 @@ void TrajectoryGenerator::generate_play_end_trajectory() {
 void TrajectoryGenerator::generate_play_trajectory(const MotionPrimitive& motion) {
     std::array<ControlMode, ROBOT::NUM_JOINT> modes = get_modes(true);
 
+    // 이 조각의 악보 시각으로 리싱크한다.
+    //
+    // 정책은 ctx.t_score 로 "지금 곡 몇 초인가"를 받아 next_hits 를 고른다. 이 값이
+    // 0 에 머물면 곡 내내 도입부 타격만 보고, 악보를 따라가지 못한다.
+    //
+    // rds[0].t 가 이 조각의 시작 시각이다 — 악보 조각은 1마디 lookahead 를 갖는
+    // 슬라이딩 윈도우지만, 내보내는 점은 get_num_point(rds[0].t, rds[1].t) 한 구간뿐이다
+    // (play_motion_generator.cpp 의 "시간의 소유자"). 조각마다 다시 맞추므로
+    // get_num_point 의 반올림 보정 오차가 곡 전체로 누적되지 않는다.
+    if (!motion.robotic_drum_score.empty()) {
+        cur_t_score = motion.robotic_drum_score[0].t;
+    }
+
     std::queue<std::array<double, ROBOT::NUM_JOINT>> play_motion = play_motion_generator.generate_motion(motion.robotic_drum_score);
 
     // 속도 계산을 위한 이전 관절각
@@ -280,6 +303,10 @@ void TrajectoryGenerator::generate_play_trajectory(const MotionPrimitive& motion
         
         set_point.mode = modes;
         push_setpoint(set_point);
+
+        // 틱당 악보 시간 증가량. get_num_point 의 dt 와 같은 식이어야 한다
+        // (n x dt = t1 - t0 이 성립하는 그 dt).
+        cur_t_score += ROBOT::DT_SECOND * ctx.play_speed_scale.load();
 
         prev_q = q;
 
@@ -356,6 +383,23 @@ bool TrajectoryGenerator::acquire_policy() {
             return false;
         }
     }
+    if (!policy_score.valid()) {
+        // 정책 악보가 없으면 팔을 넘기지 않는다.
+        //
+        // 정책의 입력은 실측 + 정책 악보(next_hits)다. 악보가 없으면 obs 조립이
+        // next_hits 에서 실패해 워치독으로 떨어진다 — 넘겨도 팔이 홀드될 뿐이다.
+        //
+        // 이 함수는 PLAY 와 HIT 이 공유하는 START 궤적에서 불린다. 악보는 두 가지가
+        // 있다: 개루프 궤적용 robotic_drum_score(MotionPrimitive 에 실려 다님)와
+        // 정책용 PolicyScoreStore(곡 시작에 한 번 발행). HIT 은 앞엣것(더미+타격 1개)은
+        // 만들지만 뒤엣것을 발행하지 않는다 — 발행은 make_play_sequence 에만 있다.
+        // 그게 맞는 설계다: HIT 은 "이 드럼을 정확히 한 번" 이라는 진단 명령이고,
+        // 정책은 타격 시퀀스를 보고 팔을 배분하므로 지정한 드럼을 보장하지 못한다.
+        // 개루프 IK 가 맞다 (원본 동작). MIDI 로드 실패로 악보가 비는 경로도 여기서
+        // 개루프로 떨어진다.
+        std::cerr << "[TrajectoryGenerator] 정책 악보 없음 — 개루프로 연주합니다\n";
+        return false;
+    }
 
     ctx.policy_fault = false;
     ctx.policy_epoch.fetch_add(1);   // ObsBuilder reset 유도
@@ -368,6 +412,17 @@ bool TrajectoryGenerator::acquire_policy() {
 void TrajectoryGenerator::release_policy() {
     if (!ctx.policy_active.exchange(false)) return;
     sync_last_q_from_robot();
+
+    // 머리도 실측으로 맞춘다.
+    // 실측이 없으면(머리 미연결·포트 실패) 기존 값을 유지한다
+    for (int j : {JointID::HEAD_YAW, JointID::HEAD_PITCH}) {
+        auto it = robot.motors.find(j);
+        if (it == robot.motors.end()) continue;
+        if (!it->second->first_recv_done) continue;
+        last_q[j]  = it->second->current_joint_angle;
+        last_qd[j] = 0.0;
+    }
+
     std::cerr << "[TrajectoryGenerator] 팔 0~8 소유권을 되받았습니다\n";
 }
 

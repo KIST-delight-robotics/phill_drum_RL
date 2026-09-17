@@ -15,12 +15,14 @@
 #include "common/robot_config.hpp"
 #include "kinematics/kinematics_solver.hpp"
 #include "trajectory/play_motion_generator.hpp"
+#include "policy/policy_score.hpp"      // acquire_policy 가 악보 유무를 본다
 #include "hardware/robot.hpp"
 #include "util/logger.hpp"
 
 class TrajectoryGenerator {
 public:
-    TrajectoryGenerator(AppContext& ctxRef, ControlQueue &controlQueueRef, Robot& robotRef);
+    TrajectoryGenerator(AppContext& ctxRef, ControlQueue &controlQueueRef, Robot& robotRef,
+                        const PolicyScoreStore &policyScoreRef);
     ~TrajectoryGenerator();
 
     void initialize(const std::map<std::string, std::vector<double>>& pose);
@@ -45,6 +47,11 @@ private:
     AppContext &ctx;
     ControlQueue &control_queue;
     Robot &robot;
+
+    // 정책 악보 스토어 (읽기 전용).
+    // acquire_policy 가 "정책이 쓸 악보가 있는가"를 판정하는 데만 쓴다.
+    // 발행은 BehaviorPlanner 가 한다 — const 로 받아 그 책임이 흩어지지 않게 한다.
+    const PolicyScoreStore &policy_score;
 
     KinematicsSolver solver;
     PlayMotionGenerator play_motion_generator;

@@ -14,14 +14,14 @@
             "gear_ratio": 9,
             "current_limit": 29.8,
             "control_gain": 1000.0,
-            "mit_kp": 100.0,
-            "mit_kd": 5.0,
+            "mit_kp": 80.0,
+            "mit_kd": 4.0,
             "mit_p_limit": 12.5,
             "mit_v_limit": 50.0,
             "mit_t_limit": 65.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 48.0
+            "mit_torque_safety": 15.0
         },
         {
             "type": "TMotor",
@@ -36,14 +36,14 @@
             "gear_ratio": 10,
             "current_limit": 23.2,
             "control_gain": 1000.0,
-            "mit_kp": 100.0,
-            "mit_kd": 5.0,
+            "mit_kp": 80.0,
+            "mit_kd": 4.0,
             "mit_p_limit": 12.5,
             "mit_v_limit": 50.0,
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 24.0
+            "mit_torque_safety": 15.0
         },
         {
             "type": "TMotor",
@@ -58,14 +58,14 @@
             "gear_ratio": 10,
             "current_limit": 23.2,
             "control_gain": 1000.0,
-            "mit_kp": 100.0,
-            "mit_kd": 5.0,
+            "mit_kp": 80.0,
+            "mit_kd": 4.0,
             "mit_p_limit": 12.5,
             "mit_v_limit": 50.0,
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 24.0
+            "mit_torque_safety": 15.0
         },
         {
             "type": "TMotor",
@@ -80,14 +80,14 @@
             "gear_ratio": 10,
             "current_limit": 23.2,
             "control_gain": 4000.0,
-            "mit_kp": 100.0,
-            "mit_kd": 5.0,
+            "mit_kp": 80.0,
+            "mit_kd": 4.0,
             "mit_p_limit": 12.5,
             "mit_v_limit": 50.0,
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 24.0
+            "mit_torque_safety": 15.0
         },
         {
             "type": "TMotor",
@@ -102,14 +102,14 @@
             "gear_ratio": 10,
             "current_limit": 23.2,
             "control_gain": 4000.0,
-            "mit_kp": 100.0,
-            "mit_kd": 5.0,
+            "mit_kp": 80.0,
+            "mit_kd": 4.0,
             "mit_p_limit": 12.5,
             "mit_v_limit": 50.0,
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 24.0
+            "mit_torque_safety": 15.0
         },
         {
             "type": "TMotor",
@@ -124,14 +124,14 @@
             "gear_ratio": 10,
             "current_limit": 23.2,
             "control_gain": 1000.0,
-            "mit_kp": 100.0,
-            "mit_kd": 5.0,
+            "mit_kp": 80.0,
+            "mit_kd": 4.0,
             "mit_p_limit": 12.5,
             "mit_v_limit": 50.0,
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 24.0
+            "mit_torque_safety": 15.0
         },
         {
             "type": "TMotor",
@@ -146,14 +146,14 @@
             "gear_ratio": 10,
             "current_limit": 23.2,
             "control_gain": 4000.0,
-            "mit_kp": 100.0,
-            "mit_kd": 5.0,
+            "mit_kp": 80.0,
+            "mit_kd": 4.0,
             "mit_p_limit": 12.5,
             "mit_v_limit": 50.0,
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 24.0
+            "mit_torque_safety": 15.0
         },
         {
             "type": "MaxonMotor",

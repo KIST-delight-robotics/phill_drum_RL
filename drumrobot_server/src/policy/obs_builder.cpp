@@ -119,8 +119,12 @@ void ObsBuilder::update_hit_state(const std::array<std::array<double, 3>, 2>& ti
                                   double dt, double now_step) {
     // ---- 팁 속도 (저역통과). alpha 는 학습과 같은 값 ----
     if (!tip_seeded_) {
+        // 리셋 직후 첫 호출은 씨딩만 하고 상태머신을 돌리지 않는다.
+        // sim 은 리셋값(hit_armed=False)을 그대로 첫 obs 로 내보내고 첫 갱신은
+        // env.step() 안에서 한다. 여기서 바로 갱신하면 C++ 이 한 스텝 앞서간다.
         tip_prev_ = tip;
         tip_seeded_ = true;
+        return;
     } else if (dt > 1e-9) {
         const double a = cfg_.tip_vel_filter_alpha;
         for (int arm = 0; arm < 2; ++arm) {
@@ -164,8 +168,13 @@ void ObsBuilder::update_hit_state(const std::array<std::array<double, 3>, 2>& ti
             if (diff_z[d] > cfg_.rearm_height) armed_[arm][d] = true;
         }
 
-        // ---- 해제: 접촉 중이면 그 팔의 전 드럼 disarm ----
-        if (nearest >= 0) armed_[arm].fill(false);
+        // ---- 해제: 접촉 중인 ★그 드럼만★ disarm ----
+        // sim hit_detector.py 가 2026-09-10 에 팔 단위 -> 드럼별로 바꿨다.
+        //   구: armed_[arm].fill(false) — 스네어에 닿으면 ride 까지 8개가 해제됐다.
+        //   드럼 8개 중 7개가 반경 13cm 밴드에 인접해(XY 최근접 12~23cm), 전이 중
+        //   낮게 지나가면 어느 밴드에 계속 걸려 재장전이 안 됐다.
+        // nearest 는 최근접 중재 후라 팔당 최대 1개 — sim 의 contact_mask 와 같다.
+        if (nearest >= 0) armed_[arm][nearest] = false;
 
         // ---- 타격 판정: 접촉 && (직전에) armed && 하강 중 ----
         // 학습 _check_hitting 과 같다. 이 값 자체는 obs 에 들어가지 않고,

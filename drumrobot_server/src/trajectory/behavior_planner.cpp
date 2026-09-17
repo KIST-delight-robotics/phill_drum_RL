@@ -129,9 +129,15 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_start() {
     }
 
     // MIT 토크 인가 절차.
-    //   1) send_thread에 제어 모드 진입을 요청한다 (CAN 쓰기는 send_thread 소유)
-    //   2) 궤적 출발점을 실측으로 맞춘다. 게인은 처음부터 최대로 두고, 오차를 0 에서
-    //      시작시켜 3초 궤적으로 home 까지 서서히 간다 (서보 모드와 같은 방식).
+    //   1) 제어 모드 진입을 요청한다 — 매뉴얼의 "enter before controlling" 지시.
+    //      시동 시 이미 진입했지만 게인을 거는 시점에 다시 보장한다
+    //      (CAN 쓰기는 send_thread 소유이므로 플래그로 요청한다).
+    //   2) 궤적 출발점을 실측으로 맞춘다.
+    //   게인은 100 으로 켜지되 출발점이 실측이라 첫 틱 오차가 0 이라 토크가 0 에서
+    //   시작한다(게인 0 이 아니다 — 밀리면 즉시 되민다). 궤적이 실측→목표를 800점
+    //   코사인으로 나누므로 목표가 확 튀지 않고 서서히 간다. init 과 home 이 같아
+    //   로봇이 제자리면 정지 유지, 어긋나면 그 차이만큼만 이동.
+    //   (제어 모드 진입은 시동 시 robot.cpp 에서 이미 끝났다.)
     if (ctx.tmotor_mit.load()) {
         ctx.mit_enter_requested = true;
         ctx.sync_last_q_requested = true;
@@ -348,6 +354,12 @@ std::vector<MotionPrimitive> BehaviorPlanner::handle_hit(const std::vector<std::
         std::cerr << "[BehaviorPlanner] HIT rejected: only allowed in IDLE\n";
         return sequence;
     }
+
+    // HIT 은 정책 악보를 발행하지 않는다 (개루프로 지정한 드럼을 치는 진단 명령이다).
+    // 앞 곡 악보가 스토어에 남아 있으면 acquire_policy 의 valid() 검사를 통과해
+    // 정책이 그 곡의 도입부를 시도하므로, 여기서 비워 개루프로 확정시킨다.
+    // 위치는 IDLE 가드 뒤다 — 거절된 HIT 이 연주 중인 곡의 악보를 지우면 안 된다.
+    policy_score.clear();
 
     const std::string& target = args[0];
 

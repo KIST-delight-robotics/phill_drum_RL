@@ -131,7 +131,7 @@ void TMotorMITCodec::encodeCommand(struct can_frame *frame, int canId, int dlc,
     frame->data[7] = t_int & 0xff;                         // torque 4 bit lower
 }
 
-std::tuple<int, float, float, float> TMotorMITCodec::decodeFeedback(struct can_frame *frame,
+std::tuple<int, float, float, float, int> TMotorMITCodec::decodeFeedback(struct can_frame *frame,
                                                                     const MotorMitLimits &lim) {
     int id;
     float position, speed, torque;
@@ -148,7 +148,10 @@ std::tuple<int, float, float, float> TMotorMITCodec::decodeFeedback(struct can_f
     speed    = uintToFloat(v_int, lim.v_min, lim.v_max, 12);
     torque   = uintToFloat(t_int, lim.t_min, lim.t_max, 12);
 
-    return std::make_tuple(id, position, speed, torque);
+    // DATA[7] = Motor Error Flag. dlc 가 짧으면 이전 프레임 내용을 읽으므로 막는다.
+    int error = (frame->can_dlc > 7) ? static_cast<int>(frame->data[7]) : 0;
+
+    return std::make_tuple(id, position, speed, torque, error);
 }
 
 int TMotorMITCodec::floatToUint(float x, float x_min, float x_max, unsigned int bits) {

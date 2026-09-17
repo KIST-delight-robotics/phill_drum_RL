@@ -312,7 +312,12 @@ bool PolicyRunner::step(uint64_t t) {
     // 실기 주기(cfg.policy_dt)를 쓴다 — 그래야 지령 각속도가 보존된다.
     std::array<double, JointID::NUM_ARM> q_cmd{};
     for (int i = 0; i < JointID::NUM_ARM; ++i) {
-        const float a = S.out_buf[i];
+        // 학습(drumrobot_env.py:385)이 액션을 [-1,1] 로 자른 뒤 적분한다.
+        // action_space 가 Box(-1,1) 로 선언돼 있고, 정책 출력(action_mean)에는
+        // 포화층이 없어 그 범위를 넘는다 — 골든 300프레임에서 2.0% 가 |a|>1,
+        // 최대 2.405. 여기서 안 자르면 손목(scale 55.6)이 한 스텝에 sim 상한
+        // 47.75도 대신 114.84도를 명령받는다.
+        const float a = std::clamp(S.out_buf[i], -1.0f, 1.0f);
         if (!std::isfinite(a)) {
             std::cerr << "[PolicyRunner] 액션에 NaN/Inf (obs 인덱스 " << i << ")\n";
             return false;

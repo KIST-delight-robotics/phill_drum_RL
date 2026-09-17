@@ -51,7 +51,9 @@ public:
 
     // 반환: (id, position[rad], velocity[rad/s], torque[N·m])
     // 주의: MIT 피드백은 can_id가 아니라 data[0]에 모터 id가 들어온다.
-    std::tuple<int, float, float, float> decodeFeedback(struct can_frame *frame,
+    // error: 0 정상 · 1 과열 · 2 과전류 · 3 과전압 · 4 저전압
+    //        5 엔코더폴트 · 6 MOSFET과열 · 7 스톨  (AK Series Driver Manual 5.3)
+    std::tuple<int, float, float, float, int> decodeFeedback(struct can_frame *frame,
                                                         const MotorMitLimits &lim);
 
     // node_id: motor.node_id

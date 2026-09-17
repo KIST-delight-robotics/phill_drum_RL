@@ -30,7 +30,17 @@ struct AppContext {
 
     // ===== MIT 모드 =====
     std::atomic<bool>   tmotor_mit{true};       // 팔 TMotor를 MIT로 구동할지 (motors.json 최상위에서 로드)
-    std::atomic<bool>   mit_enter_requested{false};  // send_loop에게 MIT 제어 모드 진입 프레임 송신을 요청
+
+    // send_loop 에게 MIT 제어 모드 진입 프레임 송신을 요청한다.
+    //
+    // 제조사 매뉴얼(AK Series Driver Manual 5.3):
+    //   "It is necessary to enter Motor Control Mode before controlling the motor"
+    // 시동 시 robot.cpp 가 이미 진입시키지만 그 뒤 START 까지 시간이 벌어진다.
+    // 폴트·전원 글리치로 드라이버가 모드에서 떨어져도 우리는 감지할 수단이 없으므로,
+    // 게인을 거는 시점에 다시 한 번 보낸다.
+    //   같은 매뉴얼: {FF..FC} 는 상태 조회 명령으로도 쓰라고 문서화되어 있다
+    //   -> 이미 모드 안인 모터에 재전송하는 것은 제조사가 의도한 사용법이다.
+    std::atomic<bool>   mit_enter_requested{false};
 
     // 토크 인가 직전에 궤적 출발점을 실측으로 맞추라는 요청.
     //

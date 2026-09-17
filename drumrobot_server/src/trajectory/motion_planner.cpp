@@ -5,7 +5,7 @@ MotionPlanner::MotionPlanner(AppContext &ctxRef, CommandQueue &commandQueueRef, 
                              const PolicyConfig &policyCfgRef, PolicyScoreStore &policyScoreRef)
     : ctx(ctxRef), command_queue(commandQueueRef), control_queue(controlQueueRef), motion_queue(motionQueueRef), robot(robotRef),
     behavior_planner(ctxRef, robotRef, audioRef, policyCfgRef, policyScoreRef),
-    trajectory_generator(ctxRef, control_queue, robotRef), motion_log("motion_command") {}
+    trajectory_generator(ctxRef, control_queue, robotRef, policyScoreRef), motion_log("motion_command") {}
 
 MotionPlanner::~MotionPlanner() {}
 

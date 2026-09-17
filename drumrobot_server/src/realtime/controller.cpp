@@ -1,5 +1,7 @@
 #include "realtime/controller.hpp"
 
+#include <cmath>       // std::isfinite
+
 Controller::Controller(AppContext &ctxRef, ControlQueue &controlQueueRef, Robot &robotRef,
                        AudioPlayer &audioRef, PolicyTarget &policyTargetRef)
     : ctx(ctxRef), control_queue(controlQueueRef), robot(robotRef), motor_log("motors"),
@@ -64,6 +66,9 @@ void Controller::send_loop() {
                 prev_point = curr_point;
                 if (auto sp = control_queue.try_pop()) {
                     curr_point = *sp;
+                    // 정책 소유 setpoint 의 q[11] 은 아직 보정 전(raw)이다.
+                    // merge 가 대입으로 쓸 수 있게 pop 시점에 원본을 보관한다.
+                    raw_head_yaw = curr_point.q[JointID::HEAD_YAW];
                     if (curr_point.audio_start) audio_player.play();
                     ctx.t_score.store(curr_point.t_score);      // 악보 시간 발행
                 } else {
@@ -85,6 +90,9 @@ void Controller::send_loop() {
 
                 // 머지는 setpoint 가 들고 온 플래그 기준 — 경계에서 어긋나지 않는다.
                 if (curr_point.policy_owns_arm) merge_policy_target(t);
+
+                // 송신 전 마지막 관문. merge 뒤라 정책 값·머리 보정까지 반영된 최종 카드를 본다.
+                if (!targets_finite(curr_point)) { ctx.running = false; break; }
 
                 send_task_1ms(cnt);
             } else if (cnt < 4) {
@@ -147,20 +155,21 @@ bool Controller::all_tmotors_received() {
     return true;
 }
 
+// NaN/Inf 는 노이즈가 아니라 상류 계산이 깨진 결과다(0/0 등). 송신 전 가드의
+// 비교는 NaN 을 전부 통과시키고(abs(NaN) > lim 이 false), 코덱의 int 캐스트는
+// INT_MIN 을 만든다. 거부해도 다음 틱에 또 나오므로 호출부가 정지시킨다.
+bool Controller::targets_finite(const ControlSetPoint &point) {
+    for (int i = 0; i < ROBOT::NUM_JOINT; ++i) {
+        if (!std::isfinite(point.q[i])) {
+            std::cerr << "[Controller] 목표에 NaN/Inf (관절 " << i << ") — 정지\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 // MIT 제어 모드 진입. 진입 자체는 통전시키지 않는다 — 첫 command 프레임에서
 // kp/kd 가 실리면서 토크가 생긴다. 그래서 게인 0 명령으로 피드백만 유도한다.
-void Controller::enter_mit_control_mode() {
-    struct can_frame frame;
-
-    for (auto &[id, motor] : robot.motors) {
-        auto tmotor = std::dynamic_pointer_cast<TMotor>(motor);
-        if (!tmotor) continue;
-
-        mit_codec.encodeEnterControlMode(tmotor->node_id, &frame);
-        robot.can.sendFrame(tmotor->socket, frame);
-    }
-    std::cout << "[Controller] MIT 제어 모드 진입\n";
-}
 
 // 정책이 소유한 팔 0~8을 슬롯의 최신값으로 채운다.
 //
@@ -171,10 +180,23 @@ void Controller::merge_policy_target(uint64_t t) {
     PolicyTarget::Snapshot pt = policy_target.snapshot();
 
     if (!pt.valid || (t - pt.tick) > WATCHDOG_TICKS) {
-        if (!ctx.policy_fault.exchange(true)) {
+        // 정책이 이미 반납했으면 잔여 카드를 소비하는 정상 종료다 (큐에 최대 19장 = 95ms,
+        // 워치독은 45ms 라 반드시 걸린다). 고장이 아니므로 abort 하지 않는다.
+        if (ctx.policy_active.load() && !ctx.policy_fault.exchange(true)) {
             std::cerr << "[Controller] 정책 워치독 — 슬롯이 비었거나 "
                       << (pt.valid ? (t - pt.tick) : 0) << "틱 낡음. 팔 홀드\n";
             ctx.play_abort = true;
+        }
+        // 팔은 홀드하되 머리는 보정한다. 그냥 return 하면 raw yaw 가 무가드
+        // Dynamixel 로 나간다. 팔이 홀드 중이라 낡은 허리각이 곧 현재 명령각이다.
+        if (pt.valid) last_waist_for_yaw = pt.q[JointID::WAIST];
+        curr_point.q[JointID::HEAD_YAW] = raw_head_yaw - last_waist_for_yaw;
+
+        // merge 가 못 채운 칸을 직전 카드 값으로 메운다. push_setpoint 가 넣은 0 을
+        // 그대로 두면 이 카드가 prev_point 가 될 때 다음 카드와의 1ms 보간이 0 에서
+        // 출발해 손목(CSP)이 큰 스텝을 받고, 팔 가드도 0 으로 오판한다.
+        for (int j = 0; j < JointID::NUM_ARM; ++j) {
+            if (curr_point.mode[j] == ControlMode::NONE) curr_point.q[j] = prev_point.q[j];
         }
         return;
     }
@@ -187,7 +209,26 @@ void Controller::merge_policy_target(uint64_t t) {
     }
 
     // 머리 yaw는 planner가 raw로 내보냈다. 허리 보정을 여기서 한다 (함정 2).
-    curr_point.q[JointID::HEAD_YAW] -= pt.q[JointID::WAIST];
+    // 대입이어야 한다: 언더플로 틱에는 curr_point 가 재사용되어 merge 가 같은 카드에
+    // 다시 돈다. 감산(-=)이면 그때마다 waist 만큼 더 깎여 드리프트한다 (비멱등).
+    last_waist_for_yaw = pt.q[JointID::WAIST];
+    curr_point.q[JointID::HEAD_YAW] = raw_head_yaw - last_waist_for_yaw;
+}
+
+// 모든 TMotor 를 MIT 제어 모드로 진입시킨다.
+// 이미 모드 안인 모터에 재전송해도 안전하다 — 같은 매뉴얼이 {FF..FC} 를
+// "stateless 상태 조회" 명령으로도 쓰라고 문서화했다. 즉 펌웨어는 이 패턴을 반드시 스페셜 프레임으로 매칭한다.
+void Controller::enter_mit_control_mode() {
+    struct can_frame frame;
+
+    for (auto &[id, motor] : robot.motors) {
+        auto tmotor = std::dynamic_pointer_cast<TMotor>(motor);
+        if (!tmotor) continue;
+
+        mit_codec.encodeEnterControlMode(tmotor->node_id, &frame);
+        robot.can.sendFrame(tmotor->socket, frame);
+    }
+    std::cout << "[Controller] MIT 제어 모드 진입\n";
 }
 
 // kp = kd = t_ff = 0 인 command. 토크를 만들지 않으면서 피드백 프레임만 받아온다.
@@ -213,6 +254,10 @@ void Controller::send_task_1ms(int cnt) {
 
     ControlSetPoint interp;
     interp.mode = curr_point.mode;
+    // policy_owns_arm 을 함께 복사한다. maxon_motor_send_task -> cal_torque 가
+    // 이 플래그로 중력 보상 여부를 판단하는데, 안 넘기면 기본값 false 가 되어
+    // 정책 연주 중 보간 프레임(cnt 0~3, 매 5ms 의 4/5)에 보상이 잘못 켜진다.
+    interp.policy_owns_arm = curr_point.policy_owns_arm;
     for (size_t i = 0; i < curr_point.q.size(); ++i) {
         interp.q[i] = prev_point.q[i] + alpha * (curr_point.q[i] - prev_point.q[i]);
     }
@@ -264,6 +309,11 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
             robot.can.sendFrame(tmotor->socket, frame);
             continue;
         }
+
+        // NONE = 정책이 이 관절을 소유한다. 이 카드에는 목표가 없으므로 아무것도 보내지
+        // 않는다 (MIT 는 직전 PD 명령을 유지한다). 가드보다 앞이어야 한다 — 뒤에 두면
+        // 가드가 목표 없는 값으로 판정하고 트립 프레임까지 보낸다.
+        if (mode == ControlMode::NONE) continue;
 
         // 목표값 안전 체크 (전송 전)
         double desired_joint = point.q[id];
@@ -382,11 +432,8 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                 control_input
             };
             motor_log.record(values);
-        } else if (mode == ControlMode::NONE) {
-            std::cerr << "[Controller] TMotor ControlMode 미설정 (" << tmotor->name << ")\n";
-            continue;
         }
- 
+
         robot.can.sendFrame(tmotor->socket, frame);
     }
 }
@@ -417,7 +464,7 @@ void Controller::maxon_motor_send_task(const ControlSetPoint &point) {
         } else if (mode == ControlMode::CST) {
             if (mode != maxon->mode) set_maxon_mode(maxon, ControlMode::CST);   // 모터가 현재 설정된 모드와 다르면 변경
 
-            double torque_mNm = cal_torque(maxon, motor_position);
+            double torque_mNm = cal_torque(maxon, motor_position, point.policy_owns_arm);
             m_codec.encodeTorque(maxon->tx_pdo_ids[3], &frame, static_cast<int>(torque_mNm));
 
             std::vector<double> values = {(double)maxon->id,
@@ -433,8 +480,7 @@ void Controller::maxon_motor_send_task(const ControlSetPoint &point) {
             std::cerr << "[Controller] MaxonMotor CSV 모드 구현 안됨 (" << maxon->name << ")\n";
             continue;
         } else if (mode == ControlMode::NONE) {
-            std::cerr << "[Controller] MaxonMotor ControlMode 미설정 (" << maxon->name << ")\n";
-            continue;
+            continue;       // 정책이 손목을 소유한다. 정상이므로 조용히 넘어간다
         }
  
         robot.can.sendFrame(maxon->socket, frame);
@@ -461,7 +507,8 @@ void Controller::set_maxon_mode(std::shared_ptr<MaxonMotor> &maxon, ControlMode 
     maxon->mode = target_mode;
 }
 
-double Controller::cal_torque(std::shared_ptr<MaxonMotor> &maxon, double target_position) {
+double Controller::cal_torque(std::shared_ptr<MaxonMotor> &maxon, double target_position,
+                              bool policy_owns_arm) {
     const double dt = 0.001;    // 1ms
     const double alpha = 0.2;   // 저역통과 필터 계수
  
@@ -478,7 +525,12 @@ double Controller::cal_torque(std::shared_ptr<MaxonMotor> &maxon, double target_
     // 정책 구간에서는 반드시 꺼야 한다. 학습 제어 법칙에는 보상항이 없고,
     // 시뮬 물리의 중력 처짐을 정책이 이미 감안한 q_des를 내도록 학습됐다.
     // 실기에서 켜면 이중 보상이 되어 스틱이 위로 뜬다.
-    if (ctx.policy_active.load()) {
+    //
+    // 판단은 setpoint 라벨로 한다. ctx.policy_active 를 여기서 직접 읽으면 곡 종료
+    // (release) 후 큐에 남은 정책 소유 CST 프레임(<=100ms)에 보상이 켜져 손목이 뜬다 —
+    // merge 와 같은 기준(카드가 만들어질 때의 진실)으로 통일. CSP 는 이 함수를 타지
+    // 않으므로 무관하고, CST 개루프/전이(비정책)는 그대로 보상이 걸린다.
+    if (policy_owns_arm) {
         return torque_mNm;
     }
 
@@ -512,7 +564,10 @@ void Controller::dynamixel_send_task(const ControlSetPoint &point) {
         auto dxl = std::dynamic_pointer_cast<DynamixelMotor>(motor);
         if (!dxl) continue;
 
-        double motor_position = dxl->joint_angle_to_motor_position(point.q[id]);
+        // 관절 범위 가드. yaw = raw - waist 라 ±90도를 넘을 수 있는데,
+        // angle_to_tick 의 ±180도 클램프는 틱 산술 보호일 뿐 관절 한계가 아니다.
+        double joint_angle = std::clamp(point.q[id], dxl->min_angle, dxl->max_angle);
+        double motor_position = dxl->joint_angle_to_motor_position(joint_angle);
 
         int32_t values[3];
         uint8_t param[12];
@@ -545,6 +600,7 @@ void Controller::dynamixel_send_task(const ControlSetPoint &point) {
                 double pos   = dxl->tick_to_angle(tick);
                 dxl->current_position    = pos;
                 dxl->current_joint_angle = dxl->motor_position_to_joint_angle(pos);
+                dxl->first_recv_done     = true;   // release 의 머리 동기화가 실측 유무를 판단하는 근거
             }
         }
     }
@@ -553,7 +609,9 @@ void Controller::dynamixel_send_task(const ControlSetPoint &point) {
     for (auto &[id, motor] : robot.motors) {
         auto dxl = std::dynamic_pointer_cast<DynamixelMotor>(motor);
         if (!dxl) continue;
-        double motor_position = dxl->joint_angle_to_motor_position(point.q[id]);
+        // 송신과 같은 값을 남긴다 — 자르기 전 값을 기록하면 로그와 실제가 어긋난다.
+        double joint_angle = std::clamp(point.q[id], dxl->min_angle, dxl->max_angle);
+        double motor_position = dxl->joint_angle_to_motor_position(joint_angle);
         std::vector<double> values = {
             (double)dxl->id,
             0.0,    // 모드 없음
@@ -599,7 +657,8 @@ void Controller::distribute_frames() {
                 if (!match) continue;
 
                 if (mit) {
-                    auto [mid, pos, spd, torque] = mit_codec.decodeFeedback(&frame, tmotor->mit_limits());
+                    auto [mid, pos, spd, torque, merr] = mit_codec.decodeFeedback(&frame, tmotor->mit_limits());
+                    tmotor->current_error = merr;
                     tmotor->current_position    = pos;
                     tmotor->current_velocity    = spd;
                     tmotor->current_torque_mit  = torque;
@@ -688,29 +747,34 @@ bool Controller::safety_check_recv_tmotor(std::shared_ptr<TMotor> &motor) {
         return false;
     }
 
-    // 과부하 차단은 MIT 구간에서 정지시키지 않는다. 관측만 한다.
+    // 모터가 보고한 에러 코드. 0 이 아니면 정상 상태가 아니므로 멈춘다.
+    if (ctx.tmotor_mit.load() && motor->current_error != 0) {
+        static const char* kErr[8] = {"정상", "모터 과열", "과전류", "과전압",
+                                      "저전압", "엔코더 폴트", "MOSFET 과열", "모터 스톨"};
+        const int e = motor->current_error;
+        std::cerr << "[Controller] TMotor 에러 (" << motor->name << ")"
+                  << "  code=" << e << " ("
+                  << (e >= 0 && e < 8 ? kErr[e] : "알 수 없음") << ")\n";
+        return false;
+    }
+
+    // 과부하 차단 — 서보 원본 로직을 MIT 에 복원 (연속 5프레임 = 25ms 초과 -> 정지).
     //
-    // 이유: 이 검사는 제어 항이 아니라 감시다 (tau 식에 아무것도 더하지 않으므로
-    // 학습과 실기의 제어 법칙은 그대로 같다). 하지만 오발동하면 연주 중에 로봇이
-    // 멈추고, 그건 학습에 없던 실패 양식을 추가하는 것이다.
+    // 임계 mit_torque_safety 는 서보의 current_limit 을 토크비로 환산한 값과 같은 선이다:
+    //   AK70-10: 23.2A x 0.123 N·m/A x 기어 10 x 효율 ~0.87 ≈ 24.8 N·m = 피크 토크
+    // MIT 피드백은 토크[N·m] 로 오므로 환산 없이 그대로 비교한다.
     //
-    // 그리고 실제로 오발동 위험이 크다 — 임계값(mit_torque_safety)은 모터 피크 토크
-    // 추정치이고 펌웨어가 이미 거기서 clamp한다. 빠른 리치에서 5프레임(MIT는 5ms
-    // 주기이므로 25ms) 연속 포화하면 트립하는데, 타격 리치가 그 정도는 된다.
-    //
-    // 보호가 사라지는 것은 아니다. 남는 것:
-    //   - 모터 펌웨어의 토크 clamp (하드웨어 보호는 원래 이쪽 담당)
-    //   - 송신 전 POS_DIFF_LIMIT(30도) / 관절 범위 검사 — 위치 기반이라 오발동이 적다
-    //   - 위의 수신 후 관절 범위 초과 -> 즉시 정지
-    //
-    // 실기 로그로 정상 연주 중 최대 토크를 확인한 뒤, 여유를 두고 되살릴 수 있다.
+    // 주의: 임계를 낮게 잡으면(현재 15) 세게 치는 타격이 25ms 넘게 걸릴 수 있다.
+    // 첫 정상 연주 로그에서 초과 지속시간을 확인하고, 오발동하면 프레임 수를 늘린다.
+    //   (실측 09-04/09-07: 두 발산 모두 위치 가드(30도)가 먼저 걸려 이 검사는 발화
+    //    전에 끝났다 — 이것은 폭주용이 아니라 걸림·눌림 같은 지속 과부하용이다.)
     if (ctx.tmotor_mit.load()) {
         if (std::abs(motor->current_torque_mit) > motor->mit_torque_safety) {
-            if (motor->cnt++ % 200 == 0) {   // 5ms 주기 -> 1초에 한 번
-                std::cerr << "[Controller] TMotor 토크 한계 근접 (" << motor->name << ")"
+            if (motor->cnt++ > 0) {
+                std::cerr << "[Controller] TMotor 토크 초과 (" << motor->name << ")"
                           << "  torque=" << motor->current_torque_mit << "Nm"
-                          << "  limit=" << motor->mit_torque_safety << "Nm"
-                          << "  (관측만 — 정지하지 않음)\n";
+                          << "  limit=" << motor->mit_torque_safety << "Nm\n";
+                return false;
             }
         } else {
             motor->cnt = 0;
@@ -720,7 +784,7 @@ bool Controller::safety_check_recv_tmotor(std::shared_ptr<TMotor> &motor) {
 
     // 서보 모드는 기존 동작 유지 (연속 5회 초과 -> 정지)
     if (motor->current_motor_current > motor->current_limit) {
-        if (motor->cnt++ > 5) {
+        if (motor->cnt++ > 0) {
             std::cerr << "[Controller] TMotor 전류 초과 (" << motor->name << ")"
                       << "  current=" << motor->current_motor_current << "A\n";
             return false;
