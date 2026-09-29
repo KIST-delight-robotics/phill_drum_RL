@@ -65,6 +65,14 @@ private:
 
     void prime_mit_feedback();
 
+    // 위치 유지를 버리고 감쇠만 남긴다 (kp=0, kd=mit_kd -> tau = -kd*v).
+    // 비상정지용. 트립 조건을 만든 명령을 그대로 유지하지 않기 위한 것이다 —
+    // 송신만 멈추면 MIT 는 마지막 PD 명령을 계속 걸고 있는다.
+    //
+    // 1회 송신으로 끝난다는 전제는 "MIT 는 명령이 끊겨도 직전 명령을 유지한다" 이다.
+    // 이 전제가 틀리면(펌웨어에 command timeout 이 있으면) 루프로 계속 뿌려야 한다.
+    void damped_stop_all();
+
     // 정책 슬롯의 최신값으로 팔 0~8을 덮어쓴다. 낡았으면 아무것도 하지 않는다.
     void merge_policy_target(uint64_t t);
 

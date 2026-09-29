@@ -21,7 +21,7 @@
             "mit_t_limit": 65.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 15.0
+            "mit_torque_safety": 13.0
         },
         {
             "type": "TMotor",
@@ -43,7 +43,7 @@
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 15.0
+            "mit_torque_safety": 13.0
         },
         {
             "type": "TMotor",
@@ -65,7 +65,7 @@
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 15.0
+            "mit_torque_safety": 13.0
         },
         {
             "type": "TMotor",
@@ -87,7 +87,7 @@
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 15.0
+            "mit_torque_safety": 13.0
         },
         {
             "type": "TMotor",
@@ -109,7 +109,7 @@
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 15.0
+            "mit_torque_safety": 13.0
         },
         {
             "type": "TMotor",
@@ -131,7 +131,7 @@
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 15.0
+            "mit_torque_safety": 13.0
         },
         {
             "type": "TMotor",
@@ -153,7 +153,7 @@
             "mit_t_limit": 25.0,
             "mit_kp_max": 500.0,
             "mit_kd_max": 5.0,
-            "mit_torque_safety": 15.0
+            "mit_torque_safety": 13.0
         },
         {
             "type": "MaxonMotor",

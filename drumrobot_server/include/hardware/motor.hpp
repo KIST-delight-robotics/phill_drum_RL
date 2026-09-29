@@ -122,8 +122,8 @@ public:
     double gear_ratio;
     double control_kp;          // CST 모드용 P 게인
     double control_kd;          // CST 모드용 D 게인
-    double prev_err = 0.0;       // CST 모드용 이전 오차
-    double prev_err_dot = 0.0;   // CST 모드용 이전 오차 미분
+    double prev_pos = 0.0;       // CST 모드용 직전 실측 위치
+    double prev_qd  = 0.0;       // CST 모드용 직전 속도
 
     ControlMode mode = ControlMode::CSP;
 

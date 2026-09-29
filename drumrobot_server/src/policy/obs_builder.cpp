@@ -126,7 +126,7 @@ void ObsBuilder::update_hit_state(const std::array<std::array<double, 3>, 2>& ti
         tip_seeded_ = true;
         return;
     } else if (dt > 1e-9) {
-        const double a = cfg_.tip_vel_filter_alpha;
+        const double a = 1 - cfg_.tip_vel_filter_alpha;
         for (int arm = 0; arm < 2; ++arm) {
             for (int k = 0; k < 3; ++k) {
                 const double raw = (tip[arm][k] - tip_prev_[arm][k]) / dt;

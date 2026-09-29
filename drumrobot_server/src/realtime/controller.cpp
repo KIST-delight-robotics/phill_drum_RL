@@ -14,7 +14,7 @@ Controller::Controller(AppContext &ctxRef, ControlQueue &controlQueueRef, Robot 
         }
     }
 
-    std::vector<std::string> header = {"id", "mode", "desired", "actual", "err", "current/torque", "input"};
+    std::vector<std::string> header = {"id", "mode", "desired", "actual", "err", "current/torque", "input", "velocity"};
     motor_log.set_header(header);
 }
 
@@ -24,12 +24,9 @@ void Controller::send_loop() {
     int cnt = 0;
 
     while (ctx.running.load()) {
-        // 피드백 예열은 send_active 와 무관하게 돈다.
-        //
         // MIT 는 명령에 대한 응답으로만 피드백을 준다. START 의 실측 동기화가
         // current_joint_angle 을 필요로 하므로, recv 가 켜진 시점부터 게인 0 명령을
-        // 보내 first_recv_done 을 채워 둔다. send_active 를 기다리면 교착이다 —
-        // send_active 는 첫 궤적이 생성된 뒤에 서고, 그 궤적이 실측을 필요로 한다.
+        // 보내 first_recv_done 을 채워 둔다.
         if (ctx.recv_active.load() && ctx.tmotor_mit.load() && !all_tmotors_received()) {
             prime_mit_feedback();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -43,8 +40,8 @@ void Controller::send_loop() {
         }
 
         if (!all_tmotors_received()) {
-            // MIT는 command에 대한 응답으로만 피드백을 준다. 가만히 기다리면 교착이므로
-            // 게인 0 명령(= 토크 0)을 보내 응답을 유도한다. 서보 모드는 모터가 스스로 뿌린다.
+            // MIT는 command에 대한 응답으로만 피드백을 준다.
+            // 게인 0 명령(= 토크 0)을 보내 응답을 유도한다.
             if (ctx.tmotor_mit.load()) prime_mit_feedback();
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));     // 모든 모터가 값을 수신할 때까지 대기
@@ -76,7 +73,7 @@ void Controller::send_loop() {
                     if (err_cnt++ % 100 == 0) std::cerr << "[Controller] control_queue underflow\n";
                 }
 
-                // 유일한 시간 권위. 정책·머지·워치독이 전부 이 값을 기준으로 한다.
+                // 유일한 시간. 정책·머지·워치독이 전부 이 값을 기준으로 한다.
                 uint64_t t = ctx.tick.fetch_add(1) + 1;
 
                 // 깨우기는 ctx.policy_active 기준 — 이 플래그는 궤적 생성 시점에 서므로
@@ -114,6 +111,21 @@ void Controller::send_loop() {
             std::this_thread::sleep_until(next);
         }
     }
+
+    // 고장으로 나왔으면 팔의 위치 유지를 해제한다.
+    //
+    // 송신만 멈추면 MIT 는 마지막 PD 명령을 계속 걸고 있는다 — 토크 초과로 트립했는데
+    // 그 토크를 만들던 명령을 그대로 유지하게 된다. recv_loop 도 같이 죽어 그 뒤로는
+    // 감시도 없다. Maxon 은 safety_check_recv_maxon 이 Shutdown 을 보내 꺼지는데
+    // TMotor 만 안 꺼지고 있었다.
+    //
+    // 여기가 send_loop 의 출구라 뒤에 프레임을 보낼 코드가 없다. 트립 시점과 이 시점
+    // 사이에 정상 명령이 한 장 더 나갔더라도 감쇠 명령이 버스의 마지막 프레임이 된다.
+    //
+    // 정상 종료(SHUTTINGDOWN)는 제외한다 — shutdown 포즈에 도착한 상태다.
+    // 이 조건의 한계: 종료 중에 발생한 고장은 걸러진다. 실패 방향이 "안 건다" 쪽이라
+    // 기존 동작과 같아지므로 허용한다.
+    if (ctx.robot_state.load() != RobotState::SHUTTINGDOWN) damped_stop_all();
 
     ctx.running = false;
     std::cout << "[Controller] send_loop 종료\n";
@@ -216,8 +228,6 @@ void Controller::merge_policy_target(uint64_t t) {
 }
 
 // 모든 TMotor 를 MIT 제어 모드로 진입시킨다.
-// 이미 모드 안인 모터에 재전송해도 안전하다 — 같은 매뉴얼이 {FF..FC} 를
-// "stateless 상태 조회" 명령으로도 쓰라고 문서화했다. 즉 펌웨어는 이 패턴을 반드시 스페셜 프레임으로 매칭한다.
 void Controller::enter_mit_control_mode() {
     struct can_frame frame;
 
@@ -246,6 +256,39 @@ void Controller::prime_mit_feedback() {
             tmotor->mit_limits());
         robot.can.sendFrame(tmotor->socket, frame);
     }
+}
+
+// 안전 트립 시 팔의 위치 유지를 버리고 감쇠만 남긴다.
+//
+// kp=0 이 핵심이다. 가드 트립(tmotor_send_task)은 kp 를 살려 두는데, 거기는 루프가
+// 살아서 매 5ms p_des 를 실측으로 갱신하므로 kp 항이 커질 틈이 없다. 비상정지는
+// 1회 보내고 루프가 죽으므로 p_des 가 그 자리에 얼어붙는다 — kp 를 남기면 그게
+// 곧 영구 위치 유지가 되어, 트립을 만든 토크를 계속 거는 셈이 된다.
+//
+// 감쇠는 멈춤이 아니다. 중력이 걸리는 어깨·팔꿈치는 tau=-kd*v 가 중력토크와
+// 균형 잡히는 속도(v = tau_grav / kd)로 계속 내려간다. kd 상한이 5 라 더 낮출 수도
+// 없다. 허리(수직축)만 실제로 그 자리에 선다.
+void Controller::damped_stop_all() {
+    struct can_frame frame;
+
+    for (auto &[id, motor] : robot.motors) {
+        auto tmotor = std::dynamic_pointer_cast<TMotor>(motor);
+        if (!tmotor) continue;
+
+        // 엔코더 폴트(code 5)면 감쇠도 포기한다 — tau = -kd*v 의 v 가 그 고장난
+        // 엔코더에서 온다. 못 믿을 값으로 토크를 만드느니 0 이 낫다.
+        const double kd = (tmotor->current_error == 5) ? 0.0 : tmotor->mit_kd;
+
+        mit_codec.encodeCommand(&frame, tmotor->node_id, 8,
+            static_cast<float>(tmotor->current_position),
+            0.0f,
+            0.0f,                                   // kp = 0 — 위치를 붙잡지 않는다
+            static_cast<float>(kd),
+            0.0f, tmotor->mit_limits());
+        robot.can.sendFrame(tmotor->socket, frame);
+    }
+
+    std::cerr << "[Controller] 감쇠 정지 — 팔 위치 유지를 해제했습니다\n";
 }
 
 
@@ -293,12 +336,13 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
         if (!tmotor) continue;
 
         ControlMode mode = point.mode[id];
-        double motor_position  = tmotor->joint_angle_to_motor_position(point.q[id]);
+        double motor_position  = tmotor->joint_angle_to_motor_position(
+            std::clamp(point.q[id], tmotor->min_angle, tmotor->max_angle));
         double motor_velocity = tmotor->direction_sign * point.qd[id];    // rad/s
  
         // 토크 미인가 구간 (START 이전). 게인 0 명령만 보내 피드백을 유지한다.
         // 목표는 실측으로 두고 안전 체크도 건너뛴다 — 오차 자체가 의미 없다.
-        //
+
         // point.mode 가 아니라 tmotor_mit 로 판단한다: ControlSetPoint 의 기본 mode 는
         // POS 이므로, mode 로 걸면 START 이전의 기본 setpoint 가 서보 위치 명령으로
         // 나가 버린다.
@@ -316,7 +360,7 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
         if (mode == ControlMode::NONE) continue;
 
         // 목표값 안전 체크 (전송 전)
-        double desired_joint = point.q[id];
+        double desired_joint = std::clamp(point.q[id], tmotor->min_angle, tmotor->max_angle);
         double diff = desired_joint - tmotor->current_joint_angle;
         if (std::abs(diff) > POS_DIFF_LIMIT) {
             // 5ms 주기이므로 1초에 한 번. 매 틱 찍으면 초당 200줄이 되어 다른 로그를 덮는다
@@ -328,12 +372,6 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                           << "  (연속 " << tmotor->guard_cnt << "틱)\n";
             }
             if (ctx.tmotor_mit.load()) {
-                // MIT 는 명령에 대한 응답으로만 피드백을 준다. 여기서 그냥 continue 하면
-                // current_joint_angle 이 갱신되지 않아 diff 가 얼어붙고, 가드가 상황이
-                // 해소됐는지 알 수 없게 된다 — 스스로 풀리지 못한다.
-                //   실측 2026-09-02: 개루프 연주 중 1.355초 교착 (actual 이 한 자리도 안 변함)
-                // 서보 모드는 모터가 피드백을 스스로 뿌리므로 이 문제가 없었다.
-                //
                 // 궤적 목표는 그대로 거부하고, 실측을 목표로 보내 그 자리에 버티게 한다.
                 // p_des = 실측이므로 tau = Kd(0 - qd) — 순수 감쇠다. 거부한 명령보다
                 // 토크가 작고, 피드백이 살아 있어 다음 틱에 새 값으로 재판정한다.
@@ -354,12 +392,6 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                           << "  (연속 " << tmotor->guard_cnt << "틱)\n";
             }
             if (ctx.tmotor_mit.load()) {
-                // MIT 는 명령에 대한 응답으로만 피드백을 준다. 여기서 그냥 continue 하면
-                // current_joint_angle 이 갱신되지 않아 diff 가 얼어붙고, 가드가 상황이
-                // 해소됐는지 알 수 없게 된다 — 스스로 풀리지 못한다.
-                //   실측 2026-09-02: 개루프 연주 중 1.355초 교착 (actual 이 한 자리도 안 변함)
-                // 서보 모드는 모터가 피드백을 스스로 뿌리므로 이 문제가 없었다.
-                //
                 // 궤적 목표는 그대로 거부하고, 실측을 목표로 보내 그 자리에 버티게 한다.
                 // p_des = 실측이므로 tau = Kd(0 - qd) — 순수 감쇠다. 거부한 명령보다
                 // 토크가 작고, 피드백이 살아 있어 다음 틱에 새 값으로 재판정한다.
@@ -400,7 +432,8 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                 tmotor->current_position,
                 p_des - tmotor->current_position,
                 tmotor->current_torque_mit,     // MIT 는 전류가 아니라 토크
-                tmotor->mit_kp                  // 걸린 게인 (이전에는 램프 배율)
+                tmotor->mit_kp,                 // 걸린 게인 (이전에는 램프 배율)
+                tmotor->current_velocity        
             };
             motor_log.record(values);
         } else if (mode == ControlMode::POS) {
@@ -504,6 +537,12 @@ void Controller::set_maxon_mode(std::shared_ptr<MaxonMotor> &maxon, ControlMode 
     m_codec.encodeEnable(maxon->tx_pdo_ids[0], &frame);
     robot.can.sendFrame(maxon->socket, frame);
 
+    // CST 감쇠항의 차분 기준점을 지금 실측으로 다시 잡는다.
+    // prev_pos 는 cal_torque(CST 전용)에서만 갱신되는데 CSP 구간에도 손목은 움직인다.
+    // 초기화하지 않으면 CST 로 돌아올 때 낡은 값과 차분해 첫 토크가 포화한다.
+    maxon->prev_pos = maxon->current_position;
+    maxon->prev_qd  = 0.0;
+
     maxon->mode = target_mode;
 }
 
@@ -513,13 +552,11 @@ double Controller::cal_torque(std::shared_ptr<MaxonMotor> &maxon, double target_
     const double alpha = 0.2;   // 저역통과 필터 계수
  
     double err = target_position - maxon->current_position;
-    double err_dot_raw = (err - maxon->prev_err) / dt;
-
-    double err_dot_filtered = alpha * err_dot_raw + (1.0 - alpha) * maxon->prev_err_dot; // 근사 필터
-    maxon->prev_err = err;
-    maxon->prev_err_dot = err_dot_filtered;
-
-    double torque_mNm = maxon->control_kp * err + maxon->control_kd * err_dot_filtered;
+    double qd_raw = (maxon->current_position - maxon->prev_pos) / dt;   // 실측을 미분
+    double qd_filtered = alpha * qd_raw + (1.0 - alpha) * maxon->prev_qd;
+    maxon->prev_pos = maxon->current_position;
+    maxon->prev_qd  = qd_filtered;
+    double torque_mNm = maxon->control_kp * err - maxon->control_kd * qd_filtered;   // 부호 -
 
     // 중력 보상.
     // 정책 구간에서는 반드시 꺼야 한다. 학습 제어 법칙에는 보상항이 없고,

@@ -325,6 +325,10 @@ bool PolicyRunner::step(uint64_t t) {
         const int m = cfg.motor_id_by_obs[i];     // obs 순서 -> 모터 id
         double q = snap.q[m] + static_cast<double>(a) * action_scale_[i] * cfg.policy_dt;
         q_cmd[m] = std::clamp(q, q_min_[m], q_max_[m]);
+        if (q_cmd[m] != q) {
+            std::cerr << "[PolicyRunner] 목표각 clamp (관절 " << m << ") "
+                      << q * 180.0 / M_PI << " -> " << q_cmd[m] * 180.0 / M_PI << "deg\n";
+        }
     }
 
     target.publish(q_cmd, t);
