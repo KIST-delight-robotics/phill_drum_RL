@@ -1,0 +1,62 @@
+{
+  "_설명": "모터 목록은 로봇 코드(Phil)의 config/motors.json 을 그대로 읽는다. 여기서 두 번 관리하지 않는다.",
+
+  "defaultMode": "servo",
+
+  "robotConfigPath": "",
+  "robotConfigSearch": [
+    "../drumrobot_server/config/motors.json",
+    "../Phil/drumrobot_server/config/motors.json",
+    "Phil/drumrobot_server/config/motors.json",
+    "~/Phil/drumrobot_server/config/motors.json",
+    "../DrumRobot/config/motors.json"
+  ],
+
+  "motorTypes": {
+    "AK10_9":  { "v": 50.0,  "t": 65.0,  "iMax": 29.8, "kt": 0.198 },
+    "AK70_10": { "v": 50.0,  "t": 25.0,  "iMax": 23.2, "kt": 0.123 },
+    "AK60_6":  { "v": 45.0,  "t": 15.0,  "iMax": 23.2, "kt": null },
+    "AK80_6":  { "v": 76.0,  "t": 12.0,  "iMax": 23.2, "kt": null },
+    "AK80_9":  { "v": 50.0,  "t": 18.0,  "iMax": null, "kt": null },
+    "AK80_80": { "v": 8.0,   "t": 144.0, "iMax": null, "kt": null },
+    "AK80_64": { "v": 8.0,   "t": 144.0, "iMax": null, "kt": null },
+    "AK80_8":  { "v": 37.5,  "t": 32.0,  "iMax": null, "kt": null }
+  },
+
+  "maxon": {
+    "feedbackPdoBase": 384,
+    "controlPdoBase": 512,
+    "positionPdoBase": 768,
+    "torquePdoBase": 1280,
+    "sdoTxBase": 1536,
+    "sdoRxBase": 1408,
+    "ratedTorqueMNm": 31.052,
+    "encoderCountsPerRev": 143360.0
+  },
+
+  "tmotor": {
+    "pMin": -12.5,
+    "pMax": 12.5,
+    "kpMin": 0.0,
+    "kpMax": 500.0,
+    "kdMin": 0.0,
+    "kdMax": 5.0,
+    "pole": 21.0,
+    "servoStatusPacketId": 41,
+    "mitMasterId": 0
+  },
+
+  "fallbackMotors": [
+    { "id": "waist",            "label": "Waist",            "nodeId": 0,  "gearRatio": 9, "type": "TMotor", "motorType": "AK10_9" },
+    { "id": "right_shoulder_1", "label": "Right Shoulder 1", "nodeId": 1,  "gearRatio": 10, "type": "TMotor", "motorType": "AK70_10" },
+    { "id": "left_shoulder_1",  "label": "Left Shoulder 1",  "nodeId": 2,  "gearRatio": 10, "type": "TMotor", "motorType": "AK70_10" },
+    { "id": "right_shoulder_2", "label": "Right Shoulder 2", "nodeId": 3,  "gearRatio": 10, "type": "TMotor", "motorType": "AK70_10" },
+    { "id": "right_elbow",      "label": "Right Elbow",      "nodeId": 4,  "gearRatio": 10, "type": "TMotor", "motorType": "AK70_10" },
+    { "id": "left_shoulder_2",  "label": "Left Shoulder 2",  "nodeId": 5,  "gearRatio": 10, "type": "TMotor", "motorType": "AK70_10" },
+    { "id": "left_elbow",       "label": "Left Elbow",       "nodeId": 6,  "gearRatio": 10, "type": "TMotor", "motorType": "AK70_10" },
+    { "id": "right_wrist",      "label": "Right Wrist",      "nodeId": 7,  "gearRatio": 35, "type": "Maxon" },
+    { "id": "left_wrist",       "label": "Left Wrist",       "nodeId": 8,  "gearRatio": 35, "type": "Maxon" },
+    { "id": "right_pedal",      "label": "Right Pedal",      "nodeId": 10, "gearRatio": 35, "type": "Maxon" },
+    { "id": "left_pedal",       "label": "Left Pedal",       "nodeId": 11, "gearRatio": 35, "type": "Maxon" }
+  ]
+}

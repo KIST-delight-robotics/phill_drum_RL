@@ -5,20 +5,36 @@
 Controller::Controller(AppContext &ctxRef, ControlQueue &controlQueueRef, Robot &robotRef,
                        AudioPlayer &audioRef, PolicyTarget &policyTargetRef)
     : ctx(ctxRef), control_queue(controlQueueRef), robot(robotRef), motor_log("motors"),
-      audio_player(audioRef), policy_target(policyTargetRef)
+      motor_ext_log("motors_ext"), audio_player(audioRef), policy_target(policyTargetRef)
 {
     for (auto &[id, motor] : robot.motors) {
-        if (id < ROBOT::NUM_JOINT) {            
+        if (id < ROBOT::NUM_JOINT) {
             curr_point.q[id] = motor->initial_joint_angle;
             prev_point.q[id] = motor->initial_joint_angle;
         }
     }
 
-    std::vector<std::string> header = {"id", "mode", "desired", "actual", "err", "current/torque", "input", "velocity"};
+    // motors 는 원 레포 헤더 그대로. 열을 늘리면 MATLAB 쪽이 깨진다 — 확장은 motors_ext 로.
+    std::vector<std::string> header = {"id", "mode", "desired", "actual", "err", "current/torque", "input"};
     motor_log.set_header(header);
+
+    std::vector<std::string> ext_header = header;
+    ext_header.push_back("velocity");
+    ext_header.push_back("tick");
+    motor_ext_log.set_header(ext_header);
 }
 
 Controller::~Controller() {}
+
+void Controller::log_motor_row(const std::vector<double> &values, double velocity) {
+    motor_log.record(values);
+
+    std::vector<double> ext = values;
+    ext.resize(7, 0.0);                     // id, mode, desired, actual, err, current/torque, input
+    ext.push_back(velocity);
+    ext.push_back(static_cast<double>(ctx.tick.load()));
+    motor_ext_log.record(ext);
+}
 
 void Controller::send_loop() {
     int cnt = 0;
@@ -99,14 +115,11 @@ void Controller::send_loop() {
                 // 5ms: TMotor + 맥슨값 동시 송신
                 send_task_5ms();
                 cnt = -1;               // 다음 루프에서 0이 됨
+                if (ctx.robot_state.load() == RobotState::SHUTTINGDOWN && control_queue.empty()) {
+                    ctx.running = false;
+                    break;}
             }
             cnt++;
-
-            // 종료 상태 + 큐 소진 -> 루프 탈출
-            if ((ctx.robot_state.load() == RobotState::SHUTTINGDOWN) && control_queue.empty()) {
-                ctx.running = false;
-                break;
-            }
 
             std::this_thread::sleep_until(next);
         }
@@ -372,16 +385,8 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                           << "  (연속 " << tmotor->guard_cnt << "틱)\n";
             }
             if (ctx.tmotor_mit.load()) {
-                // 궤적 목표는 그대로 거부하고, 실측을 목표로 보내 그 자리에 버티게 한다.
-                // p_des = 실측이므로 tau = Kd(0 - qd) — 순수 감쇠다. 거부한 명령보다
-                // 토크가 작고, 피드백이 살아 있어 다음 틱에 새 값으로 재판정한다.
-                mit_codec.encodeCommand(&frame, tmotor->node_id, 8,
-                    static_cast<float>(tmotor->current_position),
-                    0.0f,
-                    static_cast<float>(tmotor->mit_kp),
-                    static_cast<float>(tmotor->mit_kd),
-                    0.0f, tmotor->mit_limits());
-                robot.can.sendFrame(tmotor->socket, frame);
+                // 트립 = 치명. recv 트립과 같은 출구로 나가 damped_stop_all 이 마지막 프레임을 보낸다.
+                ctx.running = false;
             }
             continue;
         }
@@ -432,10 +437,10 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                 tmotor->current_position,
                 p_des - tmotor->current_position,
                 tmotor->current_torque_mit,     // MIT 는 전류가 아니라 토크
-                tmotor->mit_kp,                 // 걸린 게인 (이전에는 램프 배율)
-                tmotor->current_velocity        
+                tmotor->mit_kp                  // 걸린 게인 (이전에는 램프 배율)
             };
-            motor_log.record(values);
+            // 속도(모터 보고값 [rad/s], direction_sign 적용 전)와 tick 은 motors_ext 에만 간다.
+            log_motor_row(values, tmotor->current_velocity);
         } else if (mode == ControlMode::POS) {
             t_codec.encodePosition(tmotor->node_id, &frame, static_cast<float>(motor_position));
 
@@ -446,7 +451,7 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                 motor_position - tmotor->current_position,
                 tmotor->current_motor_current
             };
-            motor_log.record(values);
+            log_motor_row(values);
         } else if (mode == ControlMode::VEL) {
             double err = motor_position - tmotor->current_position;
             double ermp = motor_velocity * tmotor->pole * tmotor->gear_ratio * 60.0 / 2.0 / M_PI;
@@ -464,7 +469,7 @@ void Controller::tmotor_send_task(const ControlSetPoint &point) {
                 tmotor->current_motor_current,
                 control_input
             };
-            motor_log.record(values);
+            log_motor_row(values);
         }
 
         robot.can.sendFrame(tmotor->socket, frame);
@@ -493,7 +498,7 @@ void Controller::maxon_motor_send_task(const ControlSetPoint &point) {
                 motor_position - maxon->current_position,
                 maxon->current_torque
             };
-            motor_log.record(values);
+            log_motor_row(values);
         } else if (mode == ControlMode::CST) {
             if (mode != maxon->mode) set_maxon_mode(maxon, ControlMode::CST);   // 모터가 현재 설정된 모드와 다르면 변경
 
@@ -508,7 +513,7 @@ void Controller::maxon_motor_send_task(const ControlSetPoint &point) {
                 maxon->current_torque,
                 torque_mNm
             };
-            motor_log.record(values);
+            log_motor_row(values);              // Maxon 은 속도 피드백 없음 -> ext 의 velocity 는 0
         } else if (mode == ControlMode::CSV) {
             std::cerr << "[Controller] MaxonMotor CSV 모드 구현 안됨 (" << maxon->name << ")\n";
             continue;
@@ -656,7 +661,7 @@ void Controller::dynamixel_send_task(const ControlSetPoint &point) {
             dxl->current_position,
             motor_position - dxl->current_position
         };
-        motor_log.record(values);
+        log_motor_row(values);
     }
 }
 
@@ -796,15 +801,6 @@ bool Controller::safety_check_recv_tmotor(std::shared_ptr<TMotor> &motor) {
     }
 
     // 과부하 차단 — 서보 원본 로직을 MIT 에 복원 (연속 5프레임 = 25ms 초과 -> 정지).
-    //
-    // 임계 mit_torque_safety 는 서보의 current_limit 을 토크비로 환산한 값과 같은 선이다:
-    //   AK70-10: 23.2A x 0.123 N·m/A x 기어 10 x 효율 ~0.87 ≈ 24.8 N·m = 피크 토크
-    // MIT 피드백은 토크[N·m] 로 오므로 환산 없이 그대로 비교한다.
-    //
-    // 주의: 임계를 낮게 잡으면(현재 15) 세게 치는 타격이 25ms 넘게 걸릴 수 있다.
-    // 첫 정상 연주 로그에서 초과 지속시간을 확인하고, 오발동하면 프레임 수를 늘린다.
-    //   (실측 09-04/09-07: 두 발산 모두 위치 가드(30도)가 먼저 걸려 이 검사는 발화
-    //    전에 끝났다 — 이것은 폭주용이 아니라 걸림·눌림 같은 지속 과부하용이다.)
     if (ctx.tmotor_mit.load()) {
         if (std::abs(motor->current_torque_mit) > motor->mit_torque_safety) {
             if (motor->cnt++ > 0) {

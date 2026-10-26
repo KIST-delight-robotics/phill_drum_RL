@@ -73,5 +73,7 @@ private:
     // ===== log =====
     Logger policy_log;
     void record(uint64_t t, double t_score, const std::array<double, JointID::NUM_ARM>& q,
-                double build_us, double infer_us);
+                double build_us, double infer_us,
+                const float* act,            // 신경망 출력 원값 9개 (clamp 전, obs 순서)
+                const PolicyObs& obs);       // 그래프에 넣은 입력 9버퍼
 };

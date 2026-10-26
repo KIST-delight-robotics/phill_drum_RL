@@ -37,7 +37,7 @@ for _cand in ("Noto Sans CJK KR", "Noto Sans CJK JP", "NanumGothic",
         break
 plt.rcParams["axes.unicode_minus"] = False  # 마이너스 기호가 두부가 되지 않게
 
-COLS = ["t", "id", "mode", "desired", "actual", "err", "torque", "input", "velocity"]
+COLS = ["t", "id", "mode", "desired", "actual", "err", "torque", "input", "velocity", "tick"]
 MODE = {0: "CST", 1: "POS/CSP", 2: "VEL", 3: "MIT"}
 
 NAMES = {0: "waist", 1: "right_shoulder_1", 2: "left_shoulder_1",

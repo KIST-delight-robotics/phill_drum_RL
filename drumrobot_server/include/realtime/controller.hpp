@@ -109,7 +109,13 @@ private:
     std::map<int, std::vector<struct can_frame>> temp_frames;
 
     // ===== log =====
+    // motors     : 원 레포(origin/main)와 같은 열 구조.
+    // motors_ext : 7열로 패딩한 뒤 velocity, tick 을 덧붙인 직사각 CSV.
     Logger motor_log;
+    Logger motor_ext_log;
+    // values 는 원 레포 모양(id, mode, desired, actual, err, [current/torque], [input]).
+    // motors 에는 그대로, motors_ext 에는 패딩 + velocity + tick 으로 쓴다.
+    void log_motor_row(const std::vector<double> &values, double velocity = 0.0);
 
     // ===== audio =====
     AudioPlayer &audio_player;

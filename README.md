@@ -1230,7 +1230,19 @@ QUIT
 | 4 | `actual` | 실측 위치 [rad, 출력축] |
 | 5 | `err` | `desired − actual` — **토크 측정에 쓰는 값** |
 | 6 | `current/torque` | MIT 는 **토크 [N·m]**, 서보는 전류 [A] — **의미가 다릅니다** |
-| 7 | `input` | MIT 는 게인 램프값 0~1 |
+| 7 | `input` | MIT 는 걸린 Kp. 서보 VEL 은 control_input, Maxon CST 는 torque_mNm |
+
+이 파일은 **원 레포(origin/main)와 열 구조가 같습니다.** 행 길이는 모드에 따라 다릅니다
+(TMotor 7~8, Maxon 7~8, Dynamixel 6). MATLAB 등 기존 도구가 읽으므로 열을 늘리지 마세요.
+
+### 확장 로그 — `log_MMDD_HHmm_motors_ext.csv`
+
+같은 행을 7열로 패딩한 뒤 두 열을 덧붙인 **직사각** CSV 입니다 (모든 행 9열 + `t`).
+
+| # | 이름 | 뜻 |
+|---|---|---|
+| 8 | `velocity` | TMotor 가 보고한 속도 [rad/s], `direction_sign` 적용 전. Maxon·Dynamixel 은 0 |
+| 9 | `tick` | 기록 시점의 `ctx.tick`. policy 로그의 `tick` 과 잇는 키 — tick N 의 정책 출력은 N+1 부터 나간다 |
 
 
 ---

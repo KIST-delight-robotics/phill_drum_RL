@@ -51,7 +51,20 @@ PolicyRunner::PolicyRunner(AppContext& ctxRef, Robot& robotRef,
                            const PolicyConfig& cfgRef, PolicyScoreStore& scoreRef,
                            PolicyTarget& targetRef, std::string model_path)
     : ctx(ctxRef), robot(robotRef), cfg(cfgRef), score(scoreRef), target(targetRef),
-      model_path_(std::move(model_path)), policy_log("policy") {}
+      model_path_(std::move(model_path)), policy_log("policy")
+{
+    // 열 순서: tick, t_score, build_us, infer_us, act×9, q_cmd×9, obs 9버퍼(그래프 입력 순서)
+    std::vector<std::string> h = {"tick", "t_score", "build_us", "infer_us"};
+    auto add = [&](const char* name, int n) {
+        for (int i = 0; i < n; ++i) h.push_back(std::string(name) + "_" + std::to_string(i));
+    };
+    add("act", 9);          // obs 순서. act × action_scale = 의도 각속도 [rad/s]
+    add("q_cmd", 9);        // 모터 id 순서. 슬롯에 발행한 목표각 [rad]
+    add("joint_pos", 9);    add("joint_vel", 9);    add("tip_pos", 6);
+    add("drum_pos", 24);    add("next_hits", 66);   add("hit_armed", 16);
+    add("arm_role", 2);     add("per_arm_pos", 12); add("per_arm_time", 4);
+    policy_log.set_header(h);
+}
 
 PolicyRunner::~PolicyRunner() = default;
 
@@ -332,19 +345,28 @@ bool PolicyRunner::step(uint64_t t) {
     }
 
     target.publish(q_cmd, t);
-    record(t, t_score, q_cmd, build_us, infer_us);
+    record(t, t_score, q_cmd, build_us, infer_us, S.out_buf.data(), obs);
     return true;
 }
 
 void PolicyRunner::record(uint64_t t, double t_score,
                           const std::array<double, JointID::NUM_ARM>& q,
-                          double build_us, double infer_us) {
+                          double build_us, double infer_us,
+                          const float* act, const PolicyObs& obs) {
     std::vector<double> row;
-    row.reserve(4 + JointID::NUM_ARM);
+    row.reserve(4 + 9 + JointID::NUM_ARM + 148);
     row.push_back(static_cast<double>(t));
     row.push_back(t_score);
     row.push_back(build_us);
     row.push_back(infer_us);
+    for (int i = 0; i < 9; ++i) row.push_back(act[i]);
     for (int j = 0; j < JointID::NUM_ARM; ++j) row.push_back(q[j]);
+
+    // ONNX 입력을 그래프 입력 순서로 그대로 적는다. 정규화 전 원시값, obs 순서·부호 적용 후.
+    auto put = [&](const auto& buf) { for (float v : buf) row.push_back(v); };
+    put(obs.joint_pos);  put(obs.joint_vel);  put(obs.tip_pos);   put(obs.drum_pos);
+    put(obs.next_hits);  put(obs.hit_armed);  put(obs.arm_role);  put(obs.per_arm_pos);
+    put(obs.per_arm_time);
+
     policy_log.record(row);
 }

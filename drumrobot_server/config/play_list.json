@@ -42,6 +42,13 @@
             "midi": "basic_4beats_1.mid",
             "init_note_r": 8,
             "init_note_l": 1
+        },
+        "TS": {
+            "score": "Snare_0",
+            "audio": "",
+            "init_note_r": 2,
+            "init_note_l": 1
         }
+        
     }
 }

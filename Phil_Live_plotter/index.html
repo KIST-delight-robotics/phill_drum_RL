@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drum Robot Live CAN Plotter</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-dot"></span>
+    <h1>Drum Robot <span>Live CAN Plotter</span></h1>
+  </div>
+
+  <div class="topbar-controls">
+    <div class="control-group">
+      <label for="globalMode">Default Mode</label>
+      <select id="globalMode">
+        <option value="servo" selected>Servo</option>
+        <option value="mit">MIT</option>
+      </select>
+    </div>
+
+    <div class="control-group">
+      <label for="wsUrl">Backend WS</label>
+      <input id="wsUrl" type="text" value="ws://localhost:8765" spellcheck="false">
+      <button id="wsRetry" class="btn btn-ghost" title="재연결 시도">재연결</button>
+    </div>
+
+    <div class="datasource-badge" id="dataSourceBadge">
+      <span class="dot"></span>
+      <span id="dataSourceLabel">MOCK DATA</span>
+    </div>
+
+    <div class="control-group logging-group">
+      <button id="loggingBtn" class="btn btn-primary">candump 로깅 시작</button>
+      <span id="loggingInfo" class="logging-info">중지됨</span>
+    </div>
+  </div>
+
+  <div class="topbar-row file-row">
+    <div class="control-group">
+      <label for="logFileSelect">로그 파일 분석</label>
+      <select id="logFileSelect"><option value="">(백엔드 연결 필요)</option></select>
+      <button id="logLoadBtn" class="btn">전체 구간 불러오기</button>
+      <button id="logLiveBtn" class="btn btn-ghost">라이브로 복귀</button>
+    </div>
+    <span id="fileInfo" class="logging-info"></span>
+  </div>
+</header>
+
+<div id="mockBanner" class="mock-banner" hidden>
+  <strong>가짜 데이터입니다.</strong>
+  백엔드에 연결되지 않아 목업 데이터를 그리고 있습니다 —
+  <code>python3 backend/can_bridge.py</code> 를 실행한 뒤 <b>재연결</b> 을 누르세요.
+</div>
+
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span>모터 목록</span>
+      <span class="hint" id="busInfo">CAN i/f 관리는 이 도구 범위 밖</span>
+      <span class="hint warn" id="busWarn"></span>
+    </div>
+    <ul id="motorList" class="motor-list"></ul>
+  </aside>
+
+  <main class="content">
+
+    <div class="view-tabs">
+      <button class="view-tab active" data-view="single">선택 모터</button>
+      <button class="view-tab" data-view="overview">전체 모터 보기</button>
+    </div>
+
+    <div id="singleView" class="view-panel">
+
+      <section class="motor-header" id="motorHeader">
+        <!-- filled by JS -->
+      </section>
+
+      <section class="charts-grid">
+        <div class="chart-card">
+          <div class="chart-card-title">
+            <h3>Position <span class="unit">[rad]</span></h3>
+            <div class="legend">
+              <span class="legend-item"><i class="swatch cmd pos"></i>Command</span>
+              <span class="legend-item"><i class="swatch fb pos"></i>Feedback</span>
+            </div>
+          </div>
+          <canvas id="chartPos"></canvas>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-card-title">
+            <h3>Velocity <span class="unit">[rad/s]</span></h3>
+            <div class="legend">
+              <span class="legend-item"><i class="swatch cmd vel"></i>Command</span>
+              <span class="legend-item"><i class="swatch fb vel"></i>Feedback</span>
+            </div>
+          </div>
+          <canvas id="chartVel"></canvas>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-card-title">
+            <h3>Torque <span class="unit">[N·m]</span></h3>
+            <div class="legend">
+              <span class="legend-item"><i class="swatch cmd tor"></i>Command</span>
+              <span class="legend-item"><i class="swatch fb tor"></i>Feedback</span>
+            </div>
+          </div>
+          <canvas id="chartTor"></canvas>
+        </div>
+      </section>
+
+    </div>
+
+    <div id="overviewView" class="view-panel" hidden>
+
+      <section class="overview-legend" id="overviewLegend">
+        <!-- filled by JS: 모터별 색상 칩 -->
+      </section>
+
+      <section class="overview-grid">
+        <div class="chart-card">
+          <div class="chart-card-title"><h3>Position &middot; Command <span class="unit">[rad]</span></h3></div>
+          <canvas id="chartPosCmdAll"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title"><h3>Position &middot; Feedback <span class="unit">[rad]</span></h3></div>
+          <canvas id="chartPosFbAll"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title"><h3>Velocity &middot; Command <span class="unit">[rad/s]</span></h3></div>
+          <canvas id="chartVelCmdAll"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title"><h3>Velocity &middot; Feedback <span class="unit">[rad/s]</span></h3></div>
+          <canvas id="chartVelFbAll"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title"><h3>Torque &middot; Command <span class="unit">[N·m]</span></h3></div>
+          <canvas id="chartTorCmdAll"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-title"><h3>Torque &middot; Feedback <span class="unit">[N·m]</span></h3></div>
+          <canvas id="chartTorFbAll"></canvas>
+        </div>
+      </section>
+
+    </div>
+
+    <section class="frame-log">
+      <div class="frame-log-header">
+        <h3>Raw CAN Frame Monitor</h3>
+        <span class="hint" id="frameLogHint">선택된 모터의 최근 프레임</span>
+      </div>
+      <div class="frame-log-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Motor</th>
+              <th>Dir</th>
+              <th>CAN ID</th>
+              <th>DLC</th>
+              <th>Data (hex)</th>
+              <th>Decoded</th>
+            </tr>
+          </thead>
+          <tbody id="frameLogBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>
