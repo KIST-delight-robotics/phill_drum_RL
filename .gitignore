@@ -12,6 +12,18 @@ drumrobot_server/lib/onnxruntime/*.tgz
 # dump_golden.py 로 재생성한다 (README 의 "검증 도구" 참조).
 drumrobot_server/data/policy/golden.json
 
+# 플롯 산출물 — 스크립트(plots/*.py)만 추적하고 그림·변환 CSV 는 안 한다
+plots/*.png
+plots/*.csv
+
+# 라이브 플로터의 candump 캡처 (run 당 수십 MB). 폴더는 .gitkeep 으로 유지
+Phil_Live_plotter/logs/*
+!Phil_Live_plotter/logs/.gitkeep
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
 # 백업·임시
 *.bak
 *.bak-*
